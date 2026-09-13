@@ -1,0 +1,10 @@
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "__pycache__"]
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+# UP037 wants quotes stripped from self-referential return annotations, but this
+# module has no `from __future__ import annotations`, so the forward reference is
+# load-bearing — the class is not bound yet when the method is defined.
+ignore = ["UP037"]
