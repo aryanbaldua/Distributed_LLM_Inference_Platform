@@ -1,20 +1,51 @@
 """In-memory worker registry: the controller's source of truth for membership.
 
 Every read and write of worker state goes through this class. Handlers never
-touch the underlying dict, because the things that will mutate it are about to
-multiply - the heartbeat reaper flips status on a timer, and request dispatch
-adjusts active_requests from inside concurrent handlers.
+touch the underlying dict: the reaper mutates status on a timer while request
+handlers are writing heartbeats into the same records, and request dispatch
+will add another writer on top of that.
 """
 
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from time import time
 
 from common.logging import get_logger
-from common.schemas import HeartbeatRequest, RegisterRequest, WorkerRecord
+from common.schemas import HeartbeatRequest, RegisterRequest, WorkerRecord, WorkerStatus
 
 log = get_logger("controller.registry")
+
+
+@dataclass(frozen=True)
+class Transition:
+    """A worker changing health state.
+
+    Returned rather than only logged so the reaper can count transitions and,
+    later, emit them as metrics. Not a pydantic model and not in schemas.py:
+    this never crosses a process boundary.
+    """
+
+    worker_id: str
+    from_status: WorkerStatus
+    to_status: WorkerStatus
+    reason: str
+
+
+def _log_transition(transition: Transition) -> None:
+    """Every health change is logged in one format, from one place.
+
+    These lines are the deliverable for the failure and recovery demos, not a
+    side effect of them, so they are worth keeping uniform.
+    """
+    log.info(
+        "worker %s %s -> %s (%s)",
+        transition.worker_id,
+        transition.from_status.value,
+        transition.to_status.value,
+        transition.reason,
+    )
 
 
 class WorkerRegistry:
@@ -76,11 +107,15 @@ class WorkerRegistry:
         and then came back - so the heartbeat cannot simply create the record:
         HeartbeatRequest carries no address or model to create it from.
 
-        `req.status` is deliberately ignored for now. Honouring a worker's
-        self-reported health is a state transition, and status transitions all
-        arrive together with the timeout reaper.
+        A worker's own opinion of its health wins over the timeout. The reaper
+        can only infer death from silence, whereas a worker that is still
+        talking can say directly that its model server is broken. So a heartbeat
+        carrying UNHEALTHY marks the worker unhealthy even though it has just
+        proved it is alive, and it stays that way: refreshing last_heartbeat
+        keeps the reaper off its back, but only a HEALTHY heartbeat revives it.
         """
         now = time() if now is None else now
+        transition: Transition | None = None
 
         with self._lock:
             record = self._workers.get(req.worker_id)
@@ -91,7 +126,79 @@ class WorkerRegistry:
             record.active_requests = req.active_requests
             record.gpu_utilization = req.gpu_utilization
             record.free_vram_mb = req.free_vram_mb
-            return True
+
+            if record.status is not req.status:
+                transition = Transition(
+                    worker_id=record.worker_id,
+                    from_status=record.status,
+                    to_status=req.status,
+                    reason=(
+                        "heartbeat resumed"
+                        if req.status is WorkerStatus.HEALTHY
+                        else "worker reported itself unhealthy"
+                    ),
+                )
+                record.status = req.status
+
+        # Logged outside the lock; nothing below here touches registry state.
+        if transition is not None:
+            _log_transition(transition)
+        return True
+
+    def sweep(self, timeout_s: float, now: float | None = None) -> list[Transition]:
+        """Mark every worker whose heartbeats have stopped.
+
+        The only path from HEALTHY to UNHEALTHY by silence. Idempotent by
+        construction - an already-unhealthy worker is skipped - so a worker that
+        stays dead for an hour produces exactly one transition, not one per
+        tick. Nothing is removed here; see evict.
+        """
+        now = time() if now is None else now
+        transitions: list[Transition] = []
+
+        with self._lock:
+            for record in self._workers.values():
+                if record.status is not WorkerStatus.HEALTHY:
+                    continue
+                age = record.heartbeat_age(now)
+                if age <= timeout_s:
+                    continue
+                transitions.append(
+                    Transition(
+                        worker_id=record.worker_id,
+                        from_status=record.status,
+                        to_status=WorkerStatus.UNHEALTHY,
+                        reason=f"no heartbeat for {age:.1f}s",
+                    )
+                )
+                record.status = WorkerStatus.UNHEALTHY
+
+        for transition in transitions:
+            _log_transition(transition)
+        return transitions
+
+    def evict(self, evict_after_s: float, now: float | None = None) -> list[str]:
+        """Forget workers that have been unreachable long enough to write off.
+
+        Gated on being UNHEALTHY rather than on age alone, so eviction can never
+        overtake failure detection however the two timeouts are configured: a
+        worker has to be marked dead before it can be forgotten.
+        """
+        now = time() if now is None else now
+
+        with self._lock:
+            evicted = [
+                worker_id
+                for worker_id, record in self._workers.items()
+                if record.status is WorkerStatus.UNHEALTHY
+                and record.heartbeat_age(now) > evict_after_s
+            ]
+            for worker_id in evicted:
+                del self._workers[worker_id]
+
+        for worker_id in evicted:
+            log.info("worker %s evicted after %.0fs unreachable", worker_id, evict_after_s)
+        return evicted
 
     def snapshot(self) -> list[WorkerRecord]:
         """Copies of every record, ordered by worker_id.

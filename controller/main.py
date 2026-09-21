@@ -1,12 +1,9 @@
-"""Controller service: owns cluster membership and answers the operator view.
-
-Failure detection - marking a worker unhealthy once its heartbeats stop - lands
-next, and adds a background reaper alongside these endpoints.
-"""
+"""Controller service: owns cluster membership, health, and the operator view."""
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -20,6 +17,7 @@ from common.schemas import (
     RegisterRequest,
     RegisterResponse,
 )
+from controller.reaper import reaper_loop
 from controller.registry import WorkerRegistry
 
 settings = ControllerSettings()
@@ -30,6 +28,7 @@ log = get_logger("controller")
 async def lifespan(app: FastAPI):
     # Built per-app rather than at import time so each test gets a clean cluster.
     app.state.registry = WorkerRegistry()
+    app.state.reaper = asyncio.create_task(reaper_loop(app.state.registry, settings))
     log.info(
         "controller up on %s:%d (heartbeat %.1fs, timeout %.1fs)",
         settings.host,
@@ -37,7 +36,14 @@ async def lifespan(app: FastAPI):
         settings.heartbeat_interval_s,
         settings.heartbeat_timeout_s,
     )
+
     yield
+
+    # Awaited after cancelling, not just cancelled: without this the loop is
+    # still pending when the event loop closes, and shutdown races it.
+    app.state.reaper.cancel()
+    with suppress(asyncio.CancelledError):
+        await app.state.reaper
     log.info("controller shutting down")
 
 

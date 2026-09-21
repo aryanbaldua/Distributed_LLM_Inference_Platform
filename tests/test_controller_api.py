@@ -4,6 +4,8 @@ The TestClient is used as a context manager on purpose: that runs the lifespan,
 which is what builds the registry, so every test starts with an empty cluster.
 """
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -91,3 +93,58 @@ def test_a_restarted_worker_rejoins_as_a_new_generation(client):
 
 def test_each_test_starts_from_an_empty_cluster(client):
     assert client.get("/cluster/workers").json()["workers"] == []
+
+
+# --- health, end to end through the app ---------------------------------------
+
+
+def wait_for_status(client, status, timeout_s=3.0):
+    """Poll the operator view the way the demo does, rather than sleeping blind."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        (worker,) = client.get("/cluster/workers").json()["workers"]
+        if worker["status"] == status:
+            return worker
+        time.sleep(0.02)
+    raise AssertionError(f"worker never became {status}")
+
+
+@pytest.fixture
+def impatient_reaper(monkeypatch):
+    """Compress the timing policy so failure detection happens in milliseconds."""
+    monkeypatch.setattr(settings, "heartbeat_timeout_s", 0.05)
+    monkeypatch.setattr(settings, "reaper_interval_s", 0.01)
+
+
+def test_the_reaper_is_actually_started_by_the_app(impatient_reaper):
+    """Every other test in this file would still pass if lifespan forgot to start it."""
+    with TestClient(app) as client:
+        register(client)
+        wait_for_status(client, "UNHEALTHY")
+
+
+def test_a_worker_that_resumes_heartbeating_recovers_without_reregistering(impatient_reaper):
+    with TestClient(app) as client:
+        register(client)
+        wait_for_status(client, "UNHEALTHY")
+
+        # Widen the timeout first, so the reaper cannot re-mark the worker in the
+        # gap between the heartbeat landing and the operator view being read.
+        settings.heartbeat_timeout_s = 60.0
+        client.post("/workers/heartbeat", json={"worker_id": "w1", "active_requests": 0})
+
+        (worker,) = client.get("/cluster/workers").json()["workers"]
+        assert worker["status"] == "HEALTHY"
+        assert worker["generation"] == 1, "it recovered; it did not restart"
+
+
+def test_a_dead_worker_stays_visible_in_the_operator_view(impatient_reaper):
+    """Unhealthy workers are kept on purpose - a worker that is visibly dead is
+    what the failure demo points at."""
+    with TestClient(app) as client:
+        register(client)
+        wait_for_status(client, "UNHEALTHY")
+
+        body = client.get("/cluster/workers").json()
+        assert len(body["workers"]) == 1
+        assert body["as_of"] - body["workers"][0]["last_heartbeat"] > 0.05

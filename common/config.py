@@ -16,6 +16,13 @@ class ControllerSettings(BaseSettings):
     heartbeat_timeout_s: float = 6.0
     reaper_interval_s: float = 1.0
 
+    # How long an unreachable worker stays in the registry before being dropped.
+    # Unhealthy workers are kept deliberately: a worker that is visibly dead is
+    # the point of the operator view, and one that comes back should find its
+    # own record rather than a stranger's. Eviction only stops the registry
+    # growing without bound across a long-lived controller.
+    evict_after_s: float = 300.0
+
 
 class WorkerSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="WORKER_", env_file=".env", extra="ignore")
