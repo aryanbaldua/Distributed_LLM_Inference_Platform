@@ -15,6 +15,7 @@ from common.config import ControllerSettings
 from common.schemas import RegisterRequest, WorkerStatus
 from controller.reaper import reaper_loop, sweep_once
 from controller.registry import WorkerRegistry
+from tests.helpers import until
 
 
 def long_silent():
@@ -33,16 +34,6 @@ def fast_settings(**overrides):
     return ControllerSettings(
         reaper_interval_s=0.01, heartbeat_timeout_s=0.01, evict_after_s=1e9, **overrides
     )
-
-
-async def until(predicate, timeout_s=2.0):
-    """Poll instead of sleeping a fixed amount, so the test is neither slow nor racy."""
-    deadline = asyncio.get_running_loop().time() + timeout_s
-    while asyncio.get_running_loop().time() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("condition never became true")
 
 
 def test_one_pass_marks_the_silent_and_then_forgets_the_long_dead():
