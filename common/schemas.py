@@ -60,6 +60,12 @@ class WorkerRecord(BaseModel):
     address: str
     model: str
     max_concurrency: int
+
+    # Bumped every time a worker re-registers under an id the controller already
+    # knows. A restarted worker process is a new generation, which is what tells
+    # "rejoined after a crash" apart from "never left" when reading the logs.
+    generation: int = 1
+
     status: WorkerStatus = WorkerStatus.HEALTHY
     last_heartbeat: float = Field(default_factory=time)
     active_requests: int = 0
@@ -67,12 +73,17 @@ class WorkerRecord(BaseModel):
     free_vram_mb: int | None = None
 
     @classmethod
-    def from_registration(cls, req: RegisterRequest) -> "WorkerRecord":
+    def from_registration(
+        cls, req: RegisterRequest, now: float | None = None, generation: int = 1
+    ) -> "WorkerRecord":
+        """Build a fresh record. `now` is injectable so tests never touch the clock."""
         return cls(
             worker_id=req.worker_id,
             address=req.address,
             model=req.model,
             max_concurrency=req.max_concurrency,
+            generation=generation,
+            last_heartbeat=time() if now is None else now,
         )
 
     def heartbeat_age(self, now: float | None = None) -> float:
@@ -82,6 +93,14 @@ class WorkerRecord(BaseModel):
 class ClusterView(BaseModel):
     """Response for GET /cluster/workers - the operator/debug view."""
 
+    as_of: float = Field(
+        default_factory=time,
+        description=(
+            "Controller clock when the snapshot was taken. Heartbeat age is "
+            "as_of - last_heartbeat, so readers never have to trust that their "
+            "own clock agrees with the controller's."
+        ),
+    )
     workers: list[WorkerRecord]
 
 

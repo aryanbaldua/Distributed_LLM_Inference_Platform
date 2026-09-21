@@ -27,7 +27,12 @@ class WorkerSettings(BaseSettings):
     max_concurrency: int = 8
 
     controller_url: str = "http://127.0.0.1:8000"
+
+    # Registration retries back off exponentially from register_retry_s up to
+    # register_backoff_max_s, so a worker started before the controller waits
+    # without hammering it. Heartbeats deliberately do not back off.
     register_retry_s: float = 2.0
+    register_backoff_max_s: float = 30.0
 
     @property
     def advertised_address(self) -> str:
