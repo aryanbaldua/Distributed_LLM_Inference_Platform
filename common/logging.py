@@ -1,5 +1,5 @@
-"""Logging setup. M0 keeps this plain; M6 swaps the formatter for structured JSON
-and threads request_id through, without callers changing.
+"""Logging setup. One formatter, configured in one place, so every process in the
+cluster produces lines that can be read side by side.
 """
 
 from __future__ import annotations
