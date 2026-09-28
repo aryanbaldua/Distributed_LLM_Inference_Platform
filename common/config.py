@@ -23,6 +23,11 @@ class ControllerSettings(BaseSettings):
     # growing without bound across a long-lived controller.
     evict_after_s: float = 300.0
 
+    # Bounds one forwarded inference request. Unrelated to the heartbeat
+    # timeouts above: generation legitimately takes far longer than a heartbeat,
+    # so this is generous where those are tight.
+    forward_timeout_s: float = 60.0
+
 
 class WorkerSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="WORKER_", env_file=".env", extra="ignore")
@@ -40,6 +45,10 @@ class WorkerSettings(BaseSettings):
     # without hammering it. Heartbeats deliberately do not back off.
     register_retry_s: float = 2.0
     register_backoff_max_s: float = 30.0
+
+    # Stands in for generation time until a real model is wired up. Adjustable
+    # at runtime through POST /debug/delay, to make one worker the slow one.
+    mock_delay_s: float = 0.25
 
     @property
     def advertised_address(self) -> str:

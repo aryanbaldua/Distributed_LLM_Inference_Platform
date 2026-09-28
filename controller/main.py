@@ -1,4 +1,6 @@
-"""Controller service: owns cluster membership, health, and the operator view."""
+"""Controller service: owns cluster membership and health, routes client requests
+to the workers that can serve them, and exposes the operator view.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +8,14 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from common.config import ControllerSettings
 from common.logging import get_logger
 from common.schemas import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
     ClusterView,
     HeartbeatRequest,
     HeartbeatResponse,
@@ -19,6 +24,7 @@ from common.schemas import (
 )
 from controller.reaper import reaper_loop
 from controller.registry import WorkerRegistry
+from controller.scheduler import select
 
 settings = ControllerSettings()
 log = get_logger("controller")
@@ -28,6 +34,7 @@ log = get_logger("controller")
 async def lifespan(app: FastAPI):
     # Built per-app rather than at import time so each test gets a clean cluster.
     app.state.registry = WorkerRegistry()
+    app.state.http = httpx.AsyncClient()
     app.state.reaper = asyncio.create_task(reaper_loop(app.state.registry, settings))
     log.info(
         "controller up on %s:%d (heartbeat %.1fs, timeout %.1fs)",
@@ -44,6 +51,7 @@ async def lifespan(app: FastAPI):
     app.state.reaper.cancel()
     with suppress(asyncio.CancelledError):
         await app.state.reaper
+    await app.state.http.aclose()
     log.info("controller shutting down")
 
 
@@ -54,7 +62,12 @@ def get_registry(request: Request) -> WorkerRegistry:
     return request.app.state.registry
 
 
+def get_http(request: Request) -> httpx.AsyncClient:
+    return request.app.state.http
+
+
 Registry = Annotated[WorkerRegistry, Depends(get_registry)]
+Http = Annotated[httpx.AsyncClient, Depends(get_http)]
 
 
 @app.get("/healthz")
@@ -92,6 +105,47 @@ async def worker_heartbeat(req: HeartbeatRequest, registry: Registry) -> Heartbe
 async def cluster_workers(registry: Registry) -> ClusterView:
     """Full registry dump. The operator view, and the evidence for every demo."""
     return ClusterView(workers=registry.snapshot())
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    req: ChatCompletionRequest, registry: Registry, http: Http, response: Response
+) -> ChatCompletionResponse:
+    """The one endpoint a client needs. Chooses a worker and forwards to it."""
+    if req.stream:
+        raise HTTPException(status_code=400, detail="streaming is not supported yet")
+
+    chosen = registry.reserve(
+        lambda workers: select(workers, req.model, settings.heartbeat_timeout_s)
+    )
+    if chosen is None:
+        raise HTTPException(
+            status_code=503, detail=f"no healthy worker is serving model {req.model!r}"
+        )
+
+    try:
+        upstream = await http.post(
+            f"http://{chosen.address}/v1/chat/completions",
+            json=req.model_dump(mode="json"),
+            timeout=settings.forward_timeout_s,
+        )
+        upstream.raise_for_status()
+        # Parsed rather than relayed untouched, so a worker answering with
+        # something that is not a completion is caught here and not by the
+        # client. ValueError covers both a non-JSON body and a failed validation.
+        completion = ChatCompletionResponse.model_validate(upstream.json())
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("worker %s failed to serve a request: %s", chosen.worker_id, exc)
+        raise HTTPException(
+            status_code=502, detail=f"worker {chosen.worker_id} did not complete the request"
+        ) from exc
+    finally:
+        # Unconditional: a request that is never released leaves the worker
+        # permanently looking busier than it is, so the scheduler stops using it.
+        registry.release(chosen.worker_id)
+
+    response.headers["X-Worker-Id"] = chosen.worker_id
+    return completion
 
 
 def main() -> None:

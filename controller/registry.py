@@ -9,6 +9,7 @@ will add another writer on top of that.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import time
 
@@ -107,6 +108,9 @@ class WorkerRegistry:
         and then came back - so the heartbeat cannot simply create the record:
         HeartbeatRequest carries no address or model to create it from.
 
+        The load it reports is recorded but is not the count scheduling uses;
+        that one belongs to the controller, which knows what it has dispatched.
+
         A worker's own opinion of its health wins over the timeout. The reaper
         can only infer death from silence, whereas a worker that is still
         talking can say directly that its model server is broken. So a heartbeat
@@ -123,7 +127,7 @@ class WorkerRegistry:
                 return False
 
             record.last_heartbeat = now
-            record.active_requests = req.active_requests
+            record.reported_active_requests = req.active_requests
             record.gpu_utilization = req.gpu_utilization
             record.free_vram_mb = req.free_vram_mb
 
@@ -144,6 +148,41 @@ class WorkerRegistry:
         if transition is not None:
             _log_transition(transition)
         return True
+
+    def reserve(
+        self, choose: Callable[[list[WorkerRecord]], WorkerRecord | None]
+    ) -> WorkerRecord | None:
+        """Pick a worker for a request and count the request against it.
+
+        Choosing and counting happen under one lock because they are one
+        decision. As two calls, every request in a burst would read the same
+        idle worker before any of them had incremented it, and they would all
+        pile onto it - the load spreading this exists to do, failing quietly.
+
+        `choose` runs with the lock held, so it must not block or await, and the
+        records it is handed are live: it may read them but not change them.
+        """
+        with self._lock:
+            chosen = choose(list(self._workers.values()))
+            if chosen is None:
+                return None
+            chosen.active_requests += 1
+            return chosen.model_copy()
+
+    def release(self, worker_id: str) -> None:
+        """Give back what reserve took, whether the request succeeded or not."""
+        with self._lock:
+            record = self._workers.get(worker_id)
+            if record is None:
+                return
+            if record.active_requests == 0:
+                # The worker re-registered mid-request, so the slot was taken
+                # against a record that no longer exists. Stopping at zero
+                # matters: a negative count would leave this worker looking like
+                # the emptiest in the cluster for as long as it stays up.
+                log.warning("nothing in flight for %s to release", worker_id)
+                return
+            record.active_requests -= 1
 
     def sweep(self, timeout_s: float, now: float | None = None) -> list[Transition]:
         """Mark every worker whose heartbeats have stopped.

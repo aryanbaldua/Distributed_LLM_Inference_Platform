@@ -59,14 +59,17 @@ def test_cluster_view_timestamps_itself_so_heartbeat_age_is_computable(client):
     assert 0 <= age < 5
 
 
-def test_heartbeat_updates_the_workers_load(client):
+def test_heartbeat_records_the_load_the_worker_reports(client):
+    """Reported separately from the controller's own count, which it must not
+    overwrite - the operator view shows both so they can be compared."""
     register(client)
 
     response = client.post("/workers/heartbeat", json={"worker_id": "w1", "active_requests": 3})
 
     assert response.status_code == 200
     (worker,) = client.get("/cluster/workers").json()["workers"]
-    assert worker["active_requests"] == 3
+    assert worker["reported_active_requests"] == 3
+    assert worker["active_requests"] == 0
 
 
 def test_heartbeat_from_an_unknown_worker_is_a_404(client):

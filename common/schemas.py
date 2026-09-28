@@ -68,7 +68,17 @@ class WorkerRecord(BaseModel):
 
     status: WorkerStatus = WorkerStatus.HEALTHY
     last_heartbeat: float = Field(default_factory=time)
+
+    # Requests the controller has dispatched here and not yet seen finish. This
+    # is the number scheduling reads: it is exact and immediate, where anything
+    # a worker reports is already most of a heartbeat interval out of date.
     active_requests: int = 0
+
+    # The worker's own count, from its last heartbeat. Kept for comparison
+    # against active_requests; a gap that does not close means requests are
+    # being counted somewhere they are not being finished.
+    reported_active_requests: int | None = None
+
     gpu_utilization: float | None = None
     free_vram_mb: int | None = None
 
@@ -118,3 +128,17 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     max_tokens: int = Field(default=256, ge=1)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int = 0
+    message: ChatMessage
+    finish_reason: Literal["stop", "length"] = "stop"
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int = Field(default_factory=lambda: int(time()))
+    model: str
+    choices: list[ChatCompletionChoice] = Field(min_length=1)
