@@ -32,11 +32,11 @@ def test_reregistering_bumps_the_generation():
 
 
 def test_reregistering_discards_the_previous_incarnations_load():
-    """A worker only re-registers because it restarted, so its old active_requests
-    count describes requests that died with the old process."""
+    """A worker only re-registers because it restarted, so requests counted
+    against the process that died are not requests the new one is serving."""
     registry = WorkerRegistry()
     registry.register(registration(), now=100.0)
-    registry.heartbeat(HeartbeatRequest(worker_id="w1", active_requests=5), now=110.0)
+    registry.reserve(lambda workers: workers[0])
 
     record = registry.register(registration(), now=200.0)
 
@@ -75,9 +75,88 @@ def test_heartbeat_refreshes_liveness_and_reported_load():
     (record,) = registry.snapshot()
     assert accepted is True
     assert record.last_heartbeat == 142.0
-    assert record.active_requests == 3
+    assert record.reported_active_requests == 3
     assert record.gpu_utilization == 0.72
     assert record.free_vram_mb == 8192
+
+
+def test_reserving_counts_the_request_against_the_chosen_worker():
+    registry = WorkerRegistry()
+    registry.register(registration(), now=100.0)
+
+    chosen = registry.reserve(lambda workers: workers[0])
+
+    (record,) = registry.snapshot()
+    assert chosen.worker_id == "w1"
+    assert record.active_requests == 1
+
+
+def test_reserving_nothing_counts_nothing():
+    registry = WorkerRegistry()
+    registry.register(registration(), now=100.0)
+
+    assert registry.reserve(lambda workers: None) is None
+    assert registry.snapshot()[0].active_requests == 0
+
+
+def test_each_reservation_is_visible_to_the_next_one():
+    """The point of choosing and counting together: a second request must not be
+    able to read the same worker as idle before the first has been counted."""
+    registry = WorkerRegistry()
+    registry.register(registration(), now=100.0)
+    seen = []
+
+    def choose(workers):
+        seen.append(workers[0].active_requests)
+        return workers[0]
+
+    registry.reserve(choose)
+    registry.reserve(choose)
+
+    assert seen == [0, 1]
+
+
+def test_releasing_gives_the_slot_back():
+    registry = WorkerRegistry()
+    registry.register(registration(), now=100.0)
+    registry.reserve(lambda workers: workers[0])
+
+    registry.release("w1")
+
+    assert registry.snapshot()[0].active_requests == 0
+
+
+def test_releasing_against_a_restarted_worker_does_not_go_negative():
+    """The record the slot was taken against is gone, and a count below zero
+    would leave the worker looking like the emptiest in the cluster."""
+    registry = WorkerRegistry()
+    registry.register(registration(), now=100.0)
+    registry.reserve(lambda workers: workers[0])
+    registry.register(registration(), now=200.0)
+
+    registry.release("w1")
+
+    assert registry.snapshot()[0].active_requests == 0
+
+
+def test_releasing_an_unknown_worker_is_harmless():
+    registry = WorkerRegistry()
+
+    registry.release("ghost")
+
+
+def test_a_heartbeat_does_not_overwrite_the_controllers_own_count():
+    """The controller knows what it dispatched; the worker's number is stale by
+    up to a heartbeat interval and must not be allowed to stand in for it."""
+    registry = WorkerRegistry()
+    registry.register(registration(), now=100.0)
+    registry.reserve(lambda workers: workers[0])
+
+    registry.heartbeat(HeartbeatRequest(worker_id="w1", active_requests=0), now=110.0)
+
+    (record,) = registry.snapshot()
+    assert record.active_requests == 1
+    assert record.reported_active_requests == 0
 
 
 def test_snapshot_hands_back_copies_not_live_records():
