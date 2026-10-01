@@ -1,4 +1,4 @@
-"""Send completions to the controller and report which worker served each one.
+"""Send completions to the master and report which worker served each one.
 
 Concurrency is the point: one request at a time cannot show load being spread,
 because each finishes before the next is dispatched.

@@ -4,7 +4,7 @@
 
 ## 1. Overview
 
-The project will provide a single inference endpoint backed by multiple worker processes or machines. Each worker runs the same supported LLM through an existing inference engine such as vLLM. A controller maintains a live view of the cluster and decides which healthy worker should receive each request.
+The project will provide a single inference endpoint backed by multiple worker processes or machines. Each worker runs the same supported LLM through an existing inference engine such as vLLM. A master maintains a live view of the cluster and decides which healthy worker should receive each request.
 
 The goal of V0 is not to optimize the model itself, but to build and understand the distributed infrastructure required to coordinate independent inference workers.
 
@@ -16,7 +16,7 @@ The goal of V0 is not to optimize the model itself, but to build and understand 
 - Allow workers to register, send heartbeats, join the cluster, and disappear from the cluster.
 - Route requests using a simple load-aware scheduling policy.
 - Detect unavailable workers and stop routing new requests to them.
-- Support streamed model responses through the controller.
+- Support streamed model responses through the master.
 - Collect enough metrics and logs to observe routing, worker health, load, and failures.
 - Run the system with at least two independent workers and demonstrate its behavior under load and failure.
 
@@ -28,17 +28,17 @@ The goal of V0 is not to optimize the model itself, but to build and understand 
 - Automatic model placement, arbitrary multi-model serving, or model migration between workers.
 - Production-grade authentication, billing, quotas, multi-tenancy, or user management.
 - Kubernetes-based orchestration or sophisticated cloud autoscaling.
-- A highly available controller or consensus protocol. The V0 controller may be a single point of failure.
+- A highly available master or consensus protocol. The V0 master may be a single point of failure.
 
 ## 2. System Architecture
 
-V0 uses a simple control-plane/data-plane split. The controller owns cluster membership and scheduling decisions. Workers own model execution. Clients interact only with the controller, so the cluster appears as one inference service.
+V0 uses a simple control-plane/data-plane split. The master owns cluster membership and scheduling decisions. Workers own model execution. Clients interact only with the master, so the cluster appears as one inference service.
 
 ```text
                   Client / Application
                            |
                            v
-                  Controller / Router
+                    Master / Router
                            |
                   scheduling + forwarding
                     /      |      \
@@ -54,40 +54,40 @@ V0 uses a simple control-plane/data-plane split. The controller owns cluster mem
 | Component | Responsibility | Key V0 State | Likely Tech |
 | --- | --- | --- | --- |
 | Client/API | Submit chat/completion requests and receive streamed output. | Request payload and stream. | HTTP |
-| Controller | Track workers, schedule requests, forward traffic, and expose cluster state. | Worker registry, health, active load. | Python + FastAPI |
-| Worker | Run one supported LLM and report health/load to the controller. | Model, queue/load, GPU stats. | Python + vLLM |
+| Master | Track workers, schedule requests, forward traffic, and expose cluster state. | Worker registry, health, active load. | Python + FastAPI |
+| Worker | Run one supported LLM and report health/load to the master. | Model, queue/load, GPU stats. | Python + vLLM |
 | Metrics | Capture request and cluster behavior for debugging and evaluation. | Latency, throughput, errors, worker health. | Logs + Prometheus |
 
-> **Important V0 assumption:** The controller is authoritative for cluster membership. V0 does not attempt decentralized membership, consensus, or controller replication.
+> **Important V0 assumption:** The master is authoritative for cluster membership. V0 does not attempt decentralized membership, consensus, or master replication.
 
 ## 3. Core V0 Flows
 
 ### 3.1 Worker Registration and Membership
 
-When a worker starts, it registers with the controller and announces the model it serves plus basic capacity information. The controller stores the worker in an in-memory registry. The worker then sends periodic heartbeats containing current load and health information.
+When a worker starts, it registers with the master and announces the model it serves plus basic capacity information. The master stores the worker in an in-memory registry. The worker then sends periodic heartbeats containing current load and health information.
 
-If heartbeats stop for longer than a configured timeout, the controller marks the worker unhealthy and removes it from scheduling eligibility.
+If heartbeats stop for longer than a configured timeout, the master marks the worker unhealthy and removes it from scheduling eligibility.
 
 ```text
 1. Worker starts and initializes the model server.
 2. Worker sends REGISTER(worker_id, address, model, capacity).
-3. Controller adds the worker to the active registry.
+3. Master adds the worker to the active registry.
 4. Worker periodically sends HEARTBEAT(load, health, GPU metrics).
-5. Controller updates the worker record and last-seen timestamp.
-6. If the timeout is exceeded, the controller marks the worker unavailable.
+5. Master updates the worker record and last-seen timestamp.
+6. If the timeout is exceeded, the master marks the worker unavailable.
 ```
 
 ### 3.2 Request Routing
 
-The controller receives an inference request, filters the registry to workers that are healthy and serving the required model, then applies a simple scheduling policy. The initial policy should prefer the worker with the lowest active-request count or shortest known queue.
+The master receives an inference request, filters the registry to workers that are healthy and serving the required model, then applies a simple scheduling policy. The initial policy should prefer the worker with the lowest active-request count or shortest known queue.
 
-The controller forwards the request and streams generated tokens back to the client.
+The master forwards the request and streams generated tokens back to the client.
 
 ```text
 Client
   |
   v
-Controller
+Master
   |
   +--> identify eligible healthy workers
   +--> choose worker using current load
@@ -103,25 +103,25 @@ Controller
       generated tokens
             |
             v
-Controller --> Client
+Master --> Client
 ```
 
 Request lifecycle:
 
-1. Client sends an inference request to the controller.
-2. Controller identifies eligible healthy workers.
+1. Client sends an inference request to the master.
+2. Master identifies eligible healthy workers.
 3. Scheduler ranks workers using current load.
-4. Controller forwards the request to the selected worker.
+4. Master forwards the request to the selected worker.
 5. Worker performs inference through vLLM.
-6. Generated tokens stream from worker to controller to client.
-7. Controller updates metrics when the request finishes or fails.
+6. Generated tokens stream from worker to master to client.
+7. Master updates metrics when the request finishes or fails.
 
 ### 3.3 Worker Failure
 
 Failure handling is intentionally basic.
 
 - If a worker becomes unreachable before a request is assigned, it is skipped.
-- If forwarding fails before generation has meaningfully started, the controller may retry the request once on another healthy worker.
+- If forwarding fails before generation has meaningfully started, the master may retry the request once on another healthy worker.
 - If a worker fails after streamed output has already been delivered, V0 may terminate the stream and return an error rather than attempting transparent continuation.
 
 This keeps V0 focused on detecting failures and routing around them without solving distributed checkpointing or generation recovery.
@@ -130,7 +130,7 @@ This keeps V0 focused on detecting failures and routing around them without solv
 
 ### 4.1 Worker State
 
-The controller maintains a small record for each worker. The exact fields can evolve, but V0 should include enough information to answer three questions:
+The master maintains a small record for each worker. The exact fields can evolve, but V0 should include enough information to answer three questions:
 
 1. Is this worker alive?
 2. Can it serve this request?
@@ -174,11 +174,11 @@ The exact API schema can evolve during implementation. V0 only needs a small set
 
 | Interface | Direction | Purpose |
 | --- | --- | --- |
-| `POST /v1/chat/completions` | Client -> Controller | Submit a request and receive a streamed response. |
-| `POST /workers/register` | Worker -> Controller | Join the cluster and advertise capabilities. |
-| `POST /workers/heartbeat` | Worker -> Controller | Refresh health and load information. |
-| `GET /cluster/workers` | Operator -> Controller | Inspect current cluster membership and state. |
-| Inference endpoint | Controller -> Worker | Forward a selected request to the model server. |
+| `POST /v1/chat/completions` | Client -> Master | Submit a request and receive a streamed response. |
+| `POST /workers/register` | Worker -> Master | Join the cluster and advertise capabilities. |
+| `POST /workers/heartbeat` | Worker -> Master | Refresh health and load information. |
+| `GET /cluster/workers` | Operator -> Master | Inspect current cluster membership and state. |
+| Inference endpoint | Master -> Worker | Forward a selected request to the model server. |
 
 The public inference interface should eventually be OpenAI-compatible where practical so existing clients can call the service without knowing how the cluster is implemented.
 
@@ -207,7 +207,7 @@ Artificially load one worker and show that new requests prefer a less-busy worke
 
 #### Worker failure
 
-Stop one worker and show that the controller marks it unhealthy and stops routing to it.
+Stop one worker and show that the master marks it unhealthy and stops routing to it.
 
 #### Worker recovery
 
@@ -215,19 +215,19 @@ Restart the worker and show that it registers or becomes healthy again and reent
 
 #### Streaming
 
-Show a client receiving tokens through the controller rather than connecting directly to a worker.
+Show a client receiving tokens through the master rather than connecting directly to a worker.
 
 ## 7. Initial Implementation Approach
 
-Development should begin in the simplest environment that preserves the architecture. The controller and multiple worker processes can initially run on one machine or a small number of machines. Once the control flow is stable, workers can be moved to separate GPU hosts without changing the logical design.
+Development should begin in the simplest environment that preserves the architecture. The master and multiple worker processes can initially run on one machine or a small number of machines. Once the control flow is stable, workers can be moved to separate GPU hosts without changing the logical design.
 
 | Area | V0 Choice |
 | --- | --- |
-| Language | Python for controller and worker services. |
+| Language | Python for master and worker services. |
 | Public API | FastAPI / HTTP with streaming responses. |
 | Inference engine | vLLM running one supported open-source model. |
 | Packaging | Docker after the first local prototype works. |
-| Cluster state | In-memory state in the controller for V0. |
+| Cluster state | In-memory state in the master for V0. |
 | Metrics | Structured logs first; Prometheus integration if time permits. |
 | Deployment | Local multi-process or a few manually provisioned machines. Kubernetes is out of scope. |
 
@@ -235,7 +235,7 @@ Development should begin in the simplest environment that preserves the architec
 
 | Risk / Simplification | V0 Treatment |
 | --- | --- |
-| Controller failure | The controller is a single point of failure. Accepted for V0; controller replication is deferred. |
+| Master failure | The master is a single point of failure. Accepted for V0; master replication is deferred. |
 | Stale load information | Heartbeats provide an approximate view of worker load. Scheduling may occasionally use stale state; this is acceptable for the baseline. |
 | Mid-stream worker failure | Transparent continuation is difficult once tokens have been emitted. V0 returns an error instead of reconstructing the stream elsewhere. |
 | GPU availability | Development may not always have several physical GPUs. Multiple workers can be simulated where needed, then validated on a smaller real GPU cluster. |
@@ -256,11 +256,11 @@ Later versions build on the same V0 architecture. The intent is to add capabilit
 
 V0 is complete when the system can demonstrate the following end-to-end behavior:
 
-- At least two independent workers can register with one controller and serve the same model.
-- Clients use one controller endpoint and do not need to know worker addresses.
-- The controller makes visible load-aware scheduling decisions.
+- At least two independent workers can register with one master and serve the same model.
+- Clients use one master endpoint and do not need to know worker addresses.
+- The master makes visible load-aware scheduling decisions.
 - Workers are removed from scheduling after missing heartbeats and can rejoin after recovery.
-- Inference output can stream through the controller to the client.
+- Inference output can stream through the master to the client.
 - Logs or metrics clearly show worker membership, routing decisions, load, and failure events.
 - A repeatable demo or test harness proves normal routing, load imbalance handling, failure detection, and recovery.
 

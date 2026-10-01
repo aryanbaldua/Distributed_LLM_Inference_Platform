@@ -2,7 +2,7 @@
 
 Registration and heartbeating are one task rather than two, because they are
 one sequence: a worker cannot heartbeat before it has registered, and a worker
-the controller has forgotten has to register again before its heartbeats mean
+the master has forgotten has to register again before its heartbeats mean
 anything. Splitting them would mean inventing a way for the two to wait on each
 other.
 """
@@ -26,7 +26,7 @@ class HeartbeatOutcome(str, Enum):
     UNREACHABLE = "unreachable"
 
 
-class ControllerClient:
+class MasterClient:
     def __init__(
         self,
         settings: WorkerSettings,
@@ -38,13 +38,13 @@ class ControllerClient:
         self._log = log or get_logger(f"worker:{settings.worker_id}")
         self._policy: RegisterResponse | None = None
         # Tracks whether the current outage has already been reported, so a
-        # controller that is down for ten minutes produces one line instead of
+        # master that is down for ten minutes produces one line instead of
         # three hundred identical ones burying everything else in the log.
         self._outage_reported = False
 
     @property
     def _base_url(self) -> str:
-        return self._settings.controller_url.rstrip("/")
+        return self._settings.master_url.rstrip("/")
 
     # --- registration ---------------------------------------------------------
 
@@ -67,7 +67,7 @@ class ControllerClient:
 
         Jittered because workers are usually started together - `run_local.sh`
         launches both at once - and without it they would retry in lockstep for
-        as long as the controller stayed down, arriving in the same instant
+        as long as the master stayed down, arriving in the same instant
         every time.
         """
         ceiling = min(
@@ -78,7 +78,7 @@ class ControllerClient:
 
     async def register_until_accepted(self) -> RegisterResponse:
         """Retry forever. A worker that gave up would need a human to restart it
-        for no reason other than being started before the controller."""
+        for no reason other than being started before the master."""
         attempt = 0
         while True:
             attempt += 1
@@ -87,7 +87,7 @@ class ControllerClient:
             except (httpx.HTTPError, ValueError) as exc:
                 delay = self.backoff_delay(attempt)
                 self._log.info(
-                    "controller at %s not accepting registrations (%s); retrying in %.1fs",
+                    "master at %s not accepting registrations (%s); retrying in %.1fs",
                     self._base_url,
                     type(exc).__name__,
                     delay,
@@ -98,7 +98,7 @@ class ControllerClient:
             self._policy = policy
             self._outage_reported = False
             self._log.info(
-                "registered with controller as %s; heartbeating every %.1fs (timeout %.1fs)",
+                "registered with master as %s; heartbeating every %.1fs (timeout %.1fs)",
                 self._settings.worker_id,
                 policy.heartbeat_interval_s,
                 policy.heartbeat_timeout_s,
@@ -162,7 +162,7 @@ class ControllerClient:
 
         A failed heartbeat is not backed off. The next beat goes out on schedule,
         because backing off here would stretch exactly the window in which the
-        controller is deciding whether this worker is still alive.
+        master is deciding whether this worker is still alive.
         """
         policy = await self.register_until_accepted()
 
@@ -174,6 +174,6 @@ class ControllerClient:
                 # This process outlived its registry entry - evicted after being
                 # unreachable long enough to be written off. Only registration
                 # can put it back: a heartbeat carries no address or model for
-                # the controller to rebuild the record from.
-                self._log.info("controller has forgotten this worker; registering again")
+                # the master to rebuild the record from.
+                self._log.info("master has forgotten this worker; registering again")
                 policy = await self.register_until_accepted()

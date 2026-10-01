@@ -1,12 +1,12 @@
-"""Env-driven settings. Controller and worker each read their own section."""
+"""Env-driven settings. Master and worker each read their own section."""
 
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class ControllerSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CONTROLLER_", env_file=".env", extra="ignore")
+class MasterSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="MASTER_", env_file=".env", extra="ignore")
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -20,7 +20,7 @@ class ControllerSettings(BaseSettings):
     # Unhealthy workers are kept deliberately: a worker that is visibly dead is
     # the point of the operator view, and one that comes back should find its
     # own record rather than a stranger's. Eviction only stops the registry
-    # growing without bound across a long-lived controller.
+    # growing without bound across a long-lived master.
     evict_after_s: float = 300.0
 
     # Bounds one forwarded inference request. Unrelated to the heartbeat
@@ -38,10 +38,10 @@ class WorkerSettings(BaseSettings):
     model: str = "mock-model"
     max_concurrency: int = 8
 
-    controller_url: str = "http://127.0.0.1:8000"
+    master_url: str = "http://127.0.0.1:8000"
 
     # Registration retries back off exponentially from register_retry_s up to
-    # register_backoff_max_s, so a worker started before the controller waits
+    # register_backoff_max_s, so a worker started before the master waits
     # without hammering it. Heartbeats deliberately do not back off.
     register_retry_s: float = 2.0
     register_backoff_max_s: float = 30.0
@@ -52,6 +52,6 @@ class WorkerSettings(BaseSettings):
 
     @property
     def advertised_address(self) -> str:
-        """What the controller should dial. 0.0.0.0 is a bind address, not a destination."""
+        """What the master should dial. 0.0.0.0 is a bind address, not a destination."""
         host = "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
         return f"{host}:{self.port}"

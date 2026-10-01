@@ -1,7 +1,7 @@
 """Worker selection, exercised with an injected clock so nothing sleeps."""
 
 from common.schemas import WorkerRecord, WorkerStatus
-from controller.scheduler import select
+from master.scheduler import select
 
 NOW = 1000.0
 TIMEOUT = 6.0

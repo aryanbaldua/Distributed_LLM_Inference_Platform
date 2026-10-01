@@ -1,4 +1,4 @@
-"""In-memory worker registry: the controller's source of truth for membership.
+"""In-memory worker registry: the master's source of truth for membership.
 
 Every read and write of worker state goes through this class. Handlers never
 touch the underlying dict: the reaper mutates status on a timer while request
@@ -16,7 +16,7 @@ from time import time
 from common.logging import get_logger
 from common.schemas import HeartbeatRequest, RegisterRequest, WorkerRecord, WorkerStatus
 
-log = get_logger("controller.registry")
+log = get_logger("master.registry")
 
 
 @dataclass(frozen=True)
@@ -109,7 +109,7 @@ class WorkerRegistry:
         HeartbeatRequest carries no address or model to create it from.
 
         The load it reports is recorded but is not the count scheduling uses;
-        that one belongs to the controller, which knows what it has dispatched.
+        that one belongs to the master, which knows what it has dispatched.
 
         A worker's own opinion of its health wins over the timeout. The reaper
         can only infer death from silence, whereas a worker that is still

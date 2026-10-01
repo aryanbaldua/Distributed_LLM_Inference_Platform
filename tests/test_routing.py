@@ -1,7 +1,7 @@
-"""Request routing, driven through the controller app with fake workers behind it.
+"""Request routing, driven through the master app with fake workers behind it.
 
-The controller's own outbound client is swapped for one that answers in process,
-so what a test asserts on is the address the controller actually chose to dial.
+The master's own outbound client is swapped for one that answers in process,
+so what a test asserts on is the address the master actually chose to dial.
 """
 
 import asyncio
@@ -11,8 +11,8 @@ import httpx
 import pytest
 
 from common.schemas import HeartbeatRequest, RegisterRequest
-from controller.main import app as controller_app
-from controller.registry import WorkerRegistry
+from master.main import app as master_app
+from master.registry import WorkerRegistry
 from tests.helpers import until
 
 WORKER_A = "127.0.0.1:8001"
@@ -28,7 +28,7 @@ def completion(address):
 
 
 class FakeWorkers:
-    """Every worker the controller might dial, answering as itself.
+    """Every worker the master might dial, answering as itself.
 
     Records the address it was reached on, which is what makes the spread of
     requests across the cluster something a test can see.
@@ -60,13 +60,13 @@ class FakeWorkers:
 async def cluster():
     registry = WorkerRegistry()
     workers = FakeWorkers()
-    controller_app.state.registry = registry
-    controller_app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(workers.handle))
+    master_app.state.registry = registry
+    master_app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(workers.handle))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=controller_app), base_url="http://controller"
+        transport=httpx.ASGITransport(app=master_app), base_url="http://master"
     ) as client:
         yield registry, workers, client
-    await controller_app.state.http.aclose()
+    await master_app.state.http.aclose()
 
 
 def join(registry, worker_id, address, model="mock-model"):
@@ -216,7 +216,7 @@ async def test_a_worker_answering_with_something_other_than_a_completion_is_a_50
     async def nonsense(request):
         return httpx.Response(200, json={"not": "a completion"})
 
-    controller_app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(nonsense))
+    master_app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(nonsense))
 
     assert (await ask(client)).status_code == 502
     assert active(registry, "worker-a") == 0

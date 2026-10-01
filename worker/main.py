@@ -1,5 +1,5 @@
-"""Worker service: registers with the controller, heartbeats for as long as it
-is up, and serves the requests the controller forwards to it.
+"""Worker service: registers with the master, heartbeats for as long as it
+is up, and serves the requests the master forwards to it.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from common.schemas import (
     ChatCompletionResponse,
     ChatMessage,
 )
-from worker.controller_client import ControllerClient
+from worker.master_client import MasterClient
 
 settings = WorkerSettings()
 log = get_logger(f"worker:{settings.worker_id}")
@@ -39,14 +39,14 @@ async def lifespan(app: FastAPI):
     app.state.delay_s = settings.mock_delay_s
     app.state.http = httpx.AsyncClient()
     app.state.membership = asyncio.create_task(
-        ControllerClient(settings, app.state.http, log).run()
+        MasterClient(settings, app.state.http, log).run()
     )
 
     yield
 
     # No deregistration on the way out. A worker that politely announces its own
     # death is a worker whose ordinary shutdown never exercises the failure
-    # detection this cluster depends on; the controller notices the silence.
+    # detection this cluster depends on; the master notices the silence.
     app.state.membership.cancel()
     with suppress(asyncio.CancelledError):
         await app.state.membership

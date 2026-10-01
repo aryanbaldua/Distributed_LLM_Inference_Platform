@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import asyncio
 
-from common.config import ControllerSettings
+from common.config import MasterSettings
 from common.logging import get_logger
-from controller.registry import Transition, WorkerRegistry
+from master.registry import Transition, WorkerRegistry
 
-log = get_logger("controller.reaper")
+log = get_logger("master.reaper")
 
 
 def sweep_once(
-    registry: WorkerRegistry, settings: ControllerSettings, now: float | None = None
+    registry: WorkerRegistry, settings: MasterSettings, now: float | None = None
 ) -> list[Transition]:
     """One pass: mark the silent dead, then forget the long dead.
 
@@ -29,7 +29,7 @@ def sweep_once(
     return transitions
 
 
-async def reaper_loop(registry: WorkerRegistry, settings: ControllerSettings) -> None:
+async def reaper_loop(registry: WorkerRegistry, settings: MasterSettings) -> None:
     """Sweep forever, until cancelled at shutdown.
 
     Sleeps first, so nothing is judged stale before it has had a chance to
