@@ -9,7 +9,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from controller.main import app, settings
+from master.main import app, settings
 
 
 @pytest.fixture
@@ -30,8 +30,8 @@ def register(client, worker_id="w1", address="127.0.0.1:8001", model="mock-model
     )
 
 
-def test_registration_returns_the_controllers_timing_policy():
-    """The worker heartbeats on the controller's schedule, not its own config."""
+def test_registration_returns_the_masters_timing_policy():
+    """The worker heartbeats on the master's schedule, not its own config."""
     with TestClient(app) as client:
         body = register(client).json()
 
@@ -60,7 +60,7 @@ def test_cluster_view_timestamps_itself_so_heartbeat_age_is_computable(client):
 
 
 def test_heartbeat_records_the_load_the_worker_reports(client):
-    """Reported separately from the controller's own count, which it must not
+    """Reported separately from the master's own count, which it must not
     overwrite - the operator view shows both so they can be compared."""
     register(client)
 

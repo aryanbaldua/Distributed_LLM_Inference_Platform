@@ -1,4 +1,4 @@
-"""The worker's membership loops, driven against the real controller app.
+"""The worker's membership loops, driven against the real master app.
 
 Reached over ASGI rather than a socket, but they are the actual endpoints, not a
 hand-written double - the contract between the two services is the thing being
@@ -15,11 +15,11 @@ from fastapi.testclient import TestClient
 import worker.main as worker_main
 from common.config import WorkerSettings
 from common.schemas import WorkerStatus
-from controller.main import app as controller_app
-from controller.main import settings as controller_settings
-from controller.registry import WorkerRegistry
+from master.main import app as master_app
+from master.main import settings as master_settings
+from master.registry import WorkerRegistry
 from tests.helpers import until
-from worker.controller_client import ControllerClient, HeartbeatOutcome
+from worker.master_client import MasterClient, HeartbeatOutcome
 
 POLICY = {"heartbeat_interval_s": 0.01, "heartbeat_timeout_s": 0.03}
 
@@ -31,7 +31,7 @@ def worker_settings(**overrides):
         port=8001,
         model="mock-model",
         max_concurrency=4,
-        controller_url="http://controller",
+        master_url="http://master",
         register_retry_s=0.001,
         register_backoff_max_s=0.004,
         **overrides,
@@ -58,15 +58,15 @@ class RecordingLog:
 @pytest.fixture
 async def cluster():
     registry = WorkerRegistry()
-    controller_app.state.registry = registry
+    master_app.state.registry = registry
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=controller_app), base_url="http://controller"
+        transport=httpx.ASGITransport(app=master_app), base_url="http://master"
     ) as http:
         yield registry, http
 
 
 def forget(registry):
-    """What the controller does to a worker it has written off, from the outside."""
+    """What the master does to a worker it has written off, from the outside."""
     written_off = time() + 1
     registry.sweep(timeout_s=0.0, now=written_off)
     registry.evict(evict_after_s=0.0, now=written_off)
@@ -77,7 +77,7 @@ def forget(registry):
 
 async def test_a_worker_registers_itself_into_the_cluster(cluster):
     registry, http = cluster
-    client = ControllerClient(worker_settings(), http)
+    client = MasterClient(worker_settings(), http)
 
     policy = await client.register_until_accepted()
 
@@ -85,10 +85,10 @@ async def test_a_worker_registers_itself_into_the_cluster(cluster):
     assert record.worker_id == "worker-a"
     assert record.address == "127.0.0.1:8001", "the dialable address, not the bind address"
     assert record.model == "mock-model"
-    assert policy.heartbeat_interval_s == controller_settings.heartbeat_interval_s
+    assert policy.heartbeat_interval_s == master_settings.heartbeat_interval_s
 
 
-async def test_registration_waits_out_a_controller_that_is_not_up_yet():
+async def test_registration_waits_out_a_master_that_is_not_up_yet():
     """Start order must not matter: a worker launched first has to survive it."""
     attempts = []
 
@@ -99,7 +99,7 @@ async def test_registration_waits_out_a_controller_that_is_not_up_yet():
         return httpx.Response(200, json=POLICY)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        policy = await ControllerClient(worker_settings(), http).register_until_accepted()
+        policy = await MasterClient(worker_settings(), http).register_until_accepted()
 
     assert len(attempts) == 3
     assert policy.heartbeat_interval_s == POLICY["heartbeat_interval_s"]
@@ -107,7 +107,7 @@ async def test_registration_waits_out_a_controller_that_is_not_up_yet():
 
 def test_backoff_grows_then_settles_at_the_ceiling():
     settings = WorkerSettings(register_retry_s=1.0, register_backoff_max_s=8.0)
-    client = ControllerClient(settings, http=None)  # backoff_delay does no I/O
+    client = MasterClient(settings, http=None)  # backoff_delay does no I/O
 
     for attempt, ceiling in enumerate([1.0, 2.0, 4.0, 8.0, 8.0, 8.0], start=1):
         delays = [client.backoff_delay(attempt) for _ in range(50)]
@@ -118,9 +118,9 @@ def test_backoff_grows_then_settles_at_the_ceiling():
 # --- heartbeats ---------------------------------------------------------------
 
 
-async def test_a_heartbeat_revives_a_worker_the_controller_gave_up_on(cluster):
+async def test_a_heartbeat_revives_a_worker_the_master_gave_up_on(cluster):
     registry, http = cluster
-    client = ControllerClient(worker_settings(), http)
+    client = MasterClient(worker_settings(), http)
     await client.register_until_accepted()
     registry.sweep(timeout_s=0.0, now=time() + 1)
     assert registry.snapshot()[0].status is WorkerStatus.UNHEALTHY
@@ -132,9 +132,9 @@ async def test_a_heartbeat_revives_a_worker_the_controller_gave_up_on(cluster):
     assert record.generation == 1, "it recovered; it did not restart"
 
 
-async def test_a_worker_notices_the_controller_has_forgotten_it(cluster):
+async def test_a_worker_notices_the_master_has_forgotten_it(cluster):
     registry, http = cluster
-    client = ControllerClient(worker_settings(), http)
+    client = MasterClient(worker_settings(), http)
     await client.register_until_accepted()
     forget(registry)
 
@@ -145,8 +145,8 @@ async def test_the_loop_registers_again_after_being_forgotten(cluster, monkeypat
     """A worker process can outlive its registry entry. Only registration can put
     it back, since a heartbeat carries no address or model."""
     registry, http = cluster
-    monkeypatch.setattr(controller_settings, "heartbeat_interval_s", 0.01)
-    task = asyncio.create_task(ControllerClient(worker_settings(), http).run())
+    monkeypatch.setattr(master_settings, "heartbeat_interval_s", 0.01)
+    task = asyncio.create_task(MasterClient(worker_settings(), http).run())
 
     try:
         await until(lambda: registry.snapshot() != [])
@@ -158,17 +158,17 @@ async def test_the_loop_registers_again_after_being_forgotten(cluster, monkeypat
         task.cancel()
 
 
-async def test_a_controller_outage_does_not_take_the_worker_down_with_it():
+async def test_a_master_outage_does_not_take_the_worker_down_with_it():
     beats = []
 
     def handler(request):
         if request.url.path == "/workers/register":
             return httpx.Response(200, json=POLICY)
         beats.append(request)
-        raise httpx.ConnectError("controller went away")
+        raise httpx.ConnectError("master went away")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        task = asyncio.create_task(ControllerClient(worker_settings(), http).run())
+        task = asyncio.create_task(MasterClient(worker_settings(), http).run())
         try:
             await until(lambda: len(beats) >= 3)
             assert not task.done(), "it keeps trying rather than exiting"
@@ -177,7 +177,7 @@ async def test_a_controller_outage_does_not_take_the_worker_down_with_it():
 
 
 async def test_a_long_outage_is_reported_once_and_so_is_the_recovery():
-    """At a 2s interval, a controller down for ten minutes is three hundred
+    """At a 2s interval, a master down for ten minutes is three hundred
     identical lines burying every transition worth reading."""
     reachable = False
 
@@ -185,12 +185,12 @@ async def test_a_long_outage_is_reported_once_and_so_is_the_recovery():
         if request.url.path == "/workers/register":
             return httpx.Response(200, json=POLICY)
         if not reachable:
-            raise httpx.ConnectError("controller went away")
+            raise httpx.ConnectError("master went away")
         return httpx.Response(200, json={"ok": True})
 
     recorder = RecordingLog()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = ControllerClient(worker_settings(), http, recorder)
+        client = MasterClient(worker_settings(), http, recorder)
         await client.register_until_accepted()
         for _ in range(5):
             await client.send_heartbeat()
@@ -205,9 +205,9 @@ async def test_a_long_outage_is_reported_once_and_so_is_the_recovery():
 
 
 def test_the_worker_app_starts_its_membership_task(monkeypatch):
-    """Every other test here drives ControllerClient directly, so all of them would
+    """Every other test here drives MasterClient directly, so all of them would
     still pass if lifespan never started it."""
-    monkeypatch.setattr(worker_main.settings, "controller_url", "http://127.0.0.1:1")
+    monkeypatch.setattr(worker_main.settings, "master_url", "http://127.0.0.1:1")
     monkeypatch.setattr(worker_main.settings, "register_retry_s", 0.01)
     monkeypatch.setattr(worker_main.settings, "register_backoff_max_s", 0.01)
 

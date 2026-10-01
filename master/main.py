@@ -1,4 +1,4 @@
-"""Controller service: owns cluster membership and health, routes client requests
+"""Master service: owns cluster membership and health, routes client requests
 to the workers that can serve them, and exposes the operator view.
 """
 
@@ -11,7 +11,7 @@ from typing import Annotated
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
-from common.config import ControllerSettings
+from common.config import MasterSettings
 from common.logging import get_logger
 from common.schemas import (
     ChatCompletionRequest,
@@ -22,12 +22,12 @@ from common.schemas import (
     RegisterRequest,
     RegisterResponse,
 )
-from controller.reaper import reaper_loop
-from controller.registry import WorkerRegistry
-from controller.scheduler import select
+from master.reaper import reaper_loop
+from master.registry import WorkerRegistry
+from master.scheduler import select
 
-settings = ControllerSettings()
-log = get_logger("controller")
+settings = MasterSettings()
+log = get_logger("master")
 
 
 @asynccontextmanager
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient()
     app.state.reaper = asyncio.create_task(reaper_loop(app.state.registry, settings))
     log.info(
-        "controller up on %s:%d (heartbeat %.1fs, timeout %.1fs)",
+        "master up on %s:%d (heartbeat %.1fs, timeout %.1fs)",
         settings.host,
         settings.port,
         settings.heartbeat_interval_s,
@@ -52,10 +52,10 @@ async def lifespan(app: FastAPI):
     with suppress(asyncio.CancelledError):
         await app.state.reaper
     await app.state.http.aclose()
-    log.info("controller shutting down")
+    log.info("master shutting down")
 
 
-app = FastAPI(title="LLM Inference Controller", version="0.0.1", lifespan=lifespan)
+app = FastAPI(title="LLM Inference Master", version="0.0.1", lifespan=lifespan)
 
 
 def get_registry(request: Request) -> WorkerRegistry:
@@ -72,14 +72,14 @@ Http = Annotated[httpx.AsyncClient, Depends(get_http)]
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"status": "ok", "role": "controller"}
+    return {"status": "ok", "role": "master"}
 
 
 @app.post("/workers/register")
 async def register_worker(req: RegisterRequest, registry: Registry) -> RegisterResponse:
     """Join the cluster, and receive the timing policy to heartbeat against.
 
-    The interval comes from the controller rather than the worker's own config so
+    The interval comes from the master rather than the worker's own config so
     that the sender's cadence and the detector's timeout can never be configured
     independently of each other.
     """

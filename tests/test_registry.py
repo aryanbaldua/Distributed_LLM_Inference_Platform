@@ -1,7 +1,7 @@
 """Registry behaviour, exercised with an injected clock so nothing sleeps."""
 
 from common.schemas import HeartbeatRequest, RegisterRequest, WorkerStatus
-from controller.registry import WorkerRegistry
+from master.registry import WorkerRegistry
 
 
 def registration(worker_id="w1", address="127.0.0.1:8001", model="mock-model", max_concurrency=4):
@@ -145,8 +145,8 @@ def test_releasing_an_unknown_worker_is_harmless():
     registry.release("ghost")
 
 
-def test_a_heartbeat_does_not_overwrite_the_controllers_own_count():
-    """The controller knows what it dispatched; the worker's number is stale by
+def test_a_heartbeat_does_not_overwrite_the_masters_own_count():
+    """The master knows what it dispatched; the worker's number is stale by
     up to a heartbeat interval and must not be allowed to stand in for it."""
     registry = WorkerRegistry()
     registry.register(registration(), now=100.0)

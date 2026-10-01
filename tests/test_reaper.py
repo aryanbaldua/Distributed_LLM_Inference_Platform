@@ -11,10 +11,10 @@ from time import time
 
 import pytest
 
-from common.config import ControllerSettings
+from common.config import MasterSettings
 from common.schemas import RegisterRequest, WorkerStatus
-from controller.reaper import reaper_loop, sweep_once
-from controller.registry import WorkerRegistry
+from master.reaper import reaper_loop, sweep_once
+from master.registry import WorkerRegistry
 from tests.helpers import until
 
 
@@ -31,7 +31,7 @@ def registration(worker_id="w1"):
 
 
 def fast_settings(**overrides):
-    return ControllerSettings(
+    return MasterSettings(
         reaper_interval_s=0.01, heartbeat_timeout_s=0.01, evict_after_s=1e9, **overrides
     )
 
@@ -39,7 +39,7 @@ def fast_settings(**overrides):
 def test_one_pass_marks_the_silent_and_then_forgets_the_long_dead():
     registry = WorkerRegistry()
     registry.register(registration(), now=100.0)
-    settings = ControllerSettings(heartbeat_timeout_s=6.0, evict_after_s=300.0)
+    settings = MasterSettings(heartbeat_timeout_s=6.0, evict_after_s=300.0)
 
     marked = sweep_once(registry, settings, now=110.0)
     assert [t.to_status for t in marked] == [WorkerStatus.UNHEALTHY]

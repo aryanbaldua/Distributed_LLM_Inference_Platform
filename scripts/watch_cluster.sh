@@ -7,12 +7,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-CONTROLLER="${CONTROLLER_URL:-http://127.0.0.1:8000}"
+MASTER="${MASTER_URL:-http://127.0.0.1:8000}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 
 render() {
-  # Heartbeat age is computed against the controller's own as_of, so the numbers
-  # do not drift if this machine's clock disagrees with the controller's.
+  # Heartbeat age is computed against the master's own as_of, so the numbers
+  # do not drift if this machine's clock disagrees with the master's.
   "$PYTHON" -c '
 import json, sys
 
@@ -29,9 +29,9 @@ for w in workers:
 }
 
 snapshot() {
-  echo "cluster @ $CONTROLLER   $(date +%H:%M:%S)"
-  curl -s --max-time 2 "$CONTROLLER/cluster/workers" | render 2>/dev/null \
-    || echo "  controller is not answering"
+  echo "cluster @ $MASTER   $(date +%H:%M:%S)"
+  curl -s --max-time 2 "$MASTER/cluster/workers" | render 2>/dev/null \
+    || echo "  master is not answering"
 }
 
 if [[ "${1:-}" == "--once" ]]; then

@@ -1,7 +1,7 @@
-"""Shared wire contract between controller, workers, and clients.
+"""Shared wire contract between master, workers, and clients.
 
 Every model here is part of an interface crossing a process boundary, so changes
-ripple. Controller-internal state that never leaves the process does not belong
+ripple. Master-internal state that never leaves the process does not belong
 in this file.
 """
 
@@ -19,20 +19,20 @@ class WorkerStatus(str, Enum):
     UNHEALTHY = "UNHEALTHY"
 
 
-# --- Worker -> Controller: membership (design 3.1) ---------------------------
+# --- Worker -> Master: membership (design 3.1) -------------------------------
 
 
 class RegisterRequest(BaseModel):
     worker_id: str
-    address: str = Field(description="host:port the controller forwards inference to")
+    address: str = Field(description="host:port the master forwards inference to")
     model: str = Field(description="exact model id served, e.g. 'Qwen/Qwen2.5-1.5B-Instruct'")
     max_concurrency: int = Field(default=8, ge=1)
 
 
 class RegisterResponse(BaseModel):
-    """The controller owns the timing policy and hands it to the worker.
+    """The master owns the timing policy and hands it to the worker.
 
-    Keeping the interval on the controller side means it can never be configured
+    Keeping the interval on the master side means it can never be configured
     with a timeout shorter than the interval its workers actually use.
     """
 
@@ -52,7 +52,7 @@ class HeartbeatResponse(BaseModel):
     ok: bool = True
 
 
-# --- Controller-internal cluster state (design 4.1) --------------------------
+# --- Master-internal cluster state (design 4.1) ------------------------------
 
 
 class WorkerRecord(BaseModel):
@@ -61,7 +61,7 @@ class WorkerRecord(BaseModel):
     model: str
     max_concurrency: int
 
-    # Bumped every time a worker re-registers under an id the controller already
+    # Bumped every time a worker re-registers under an id the master already
     # knows. A restarted worker process is a new generation, which is what tells
     # "rejoined after a crash" apart from "never left" when reading the logs.
     generation: int = 1
@@ -69,7 +69,7 @@ class WorkerRecord(BaseModel):
     status: WorkerStatus = WorkerStatus.HEALTHY
     last_heartbeat: float = Field(default_factory=time)
 
-    # Requests the controller has dispatched here and not yet seen finish. This
+    # Requests the master has dispatched here and not yet seen finish. This
     # is the number scheduling reads: it is exact and immediate, where anything
     # a worker reports is already most of a heartbeat interval out of date.
     active_requests: int = 0
@@ -106,15 +106,15 @@ class ClusterView(BaseModel):
     as_of: float = Field(
         default_factory=time,
         description=(
-            "Controller clock when the snapshot was taken. Heartbeat age is "
+            "Master clock when the snapshot was taken. Heartbeat age is "
             "as_of - last_heartbeat, so readers never have to trust that their "
-            "own clock agrees with the controller's."
+            "own clock agrees with the master's."
         ),
     )
     workers: list[WorkerRecord]
 
 
-# --- Client -> Controller: inference (design 5) ------------------------------
+# --- Client -> Master: inference (design 5) ----------------------------------
 
 
 class ChatMessage(BaseModel):
