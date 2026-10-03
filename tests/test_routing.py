@@ -71,9 +71,11 @@ async def cluster():
     await master_app.state.http.aclose()
 
 
-def join(registry, worker_id, address, model="mock-model"):
+def join(registry, worker_id, address, model="mock-model", max_concurrency=4):
     registry.register(
-        RegisterRequest(worker_id=worker_id, address=address, model=model, max_concurrency=4)
+        RegisterRequest(
+            worker_id=worker_id, address=address, model=model, max_concurrency=max_concurrency
+        )
     )
 
 
@@ -282,3 +284,63 @@ async def test_a_refused_request_is_still_given_an_id(cluster):
 
     assert response.status_code == 503
     assert response.headers["x-request-id"]
+
+
+# --- capacity -------------------------------------------------------------------
+
+
+async def test_a_worker_with_no_free_slot_is_not_dialled(cluster):
+    """The cap has to be enforced before the request is sent, not apologised for
+    after: a worker handed more than it advertised is the thing being avoided."""
+    registry, workers, client = cluster
+    join(registry, "worker-a", WORKER_A, max_concurrency=1)
+    registry.reserve(lambda records: records[0])
+
+    response = await ask(client)
+
+    assert response.status_code == 503
+    assert "at capacity" in response.json()["detail"]
+    assert workers.served == []
+
+
+async def test_the_two_refusals_do_not_read_the_same(cluster):
+    """Both are 503s and they mean opposite things, so the message has to say
+    which: one is a deployment mistake, the other is a reason to add workers."""
+    registry, _, client = cluster
+    join(registry, "worker-a", WORKER_A, max_concurrency=1)
+
+    unknown_model = await ask(client, model="nobody-serves-this")
+    registry.reserve(lambda records: records[0])
+    at_capacity = await ask(client)
+
+    assert unknown_model.status_code == at_capacity.status_code == 503
+    assert "no healthy worker" in unknown_model.json()["detail"]
+    assert "at capacity" in at_capacity.json()["detail"]
+
+
+async def test_a_slot_given_back_makes_the_worker_usable_again(cluster):
+    """The cap tracks current load, so it must not outlive the load that caused it."""
+    registry, _, client = cluster
+    join(registry, "worker-a", WORKER_A, max_concurrency=1)
+    registry.reserve(lambda records: records[0])
+
+    assert (await ask(client)).status_code == 503
+
+    registry.release("worker-a")
+
+    assert (await ask(client)).status_code == 200
+
+
+async def test_a_burst_is_capped_rather_than_dispatched_in_full(cluster):
+    """Four at once against a cluster advertising two slots is two served and two
+    refused - not four dispatched and two workers quietly oversubscribed.
+    """
+    registry, workers, client = cluster
+    workers.delay_s = 0.05
+    join(registry, "worker-a", WORKER_A, max_concurrency=1)
+    join(registry, "worker-b", WORKER_B, max_concurrency=1)
+
+    responses = await asyncio.gather(*(ask(client) for _ in range(4)))
+
+    assert Counter(r.status_code for r in responses) == {200: 2, 503: 2}
+    assert workers.most_in_flight <= 2, "no worker may be given more than it advertised"
