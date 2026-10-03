@@ -26,6 +26,7 @@ from common.schemas import (
 from master.reaper import reaper_loop
 from master.registry import WorkerRegistry
 from master.scheduler import select
+from master.trace import RequestTrace
 
 settings = MasterSettings()
 log = get_logger("master")
@@ -129,38 +130,39 @@ async def chat_completions(
     if req.stream:
         raise HTTPException(status_code=400, detail="streaming is not supported yet")
 
-    chosen = registry.reserve(
-        lambda workers: select(workers, req.model, settings.heartbeat_timeout_s)
-    )
-    if chosen is None:
-        raise HTTPException(
-            status_code=503, detail=f"no healthy worker is serving model {req.model!r}"
-        )
+    with RequestTrace(request_id, req.model, registry, log) as trace:
 
-    try:
-        upstream = await http.post(
-            f"http://{chosen.address}/v1/chat/completions",
-            json=req.model_dump(mode="json"),
-            headers={REQUEST_ID_HEADER: request_id},
-            timeout=settings.forward_timeout_s,
-        )
-        upstream.raise_for_status()
-        # Parsed rather than relayed untouched, so a worker answering with
-        # something that is not a completion is caught here and not by the
-        # client. ValueError covers both a non-JSON body and a failed validation.
-        completion = ChatCompletionResponse.model_validate(upstream.json())
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("worker %s failed to serve a request: %s", chosen.worker_id, exc)
-        raise HTTPException(
-            status_code=502, detail=f"worker {chosen.worker_id} did not complete the request"
-        ) from exc
-    finally:
-        # Unconditional: a request that is never released leaves the worker
-        # permanently looking busier than it is, so the scheduler stops using it.
-        registry.release(chosen.worker_id)
+        def choose(workers):
+            chosen = select(workers, req.model, settings.heartbeat_timeout_s)
+            trace.record_selection(chosen, workers)
+            return chosen
 
-    response.headers["X-Worker-Id"] = chosen.worker_id
-    return completion
+        chosen = registry.reserve(choose)
+        if chosen is None:
+            raise HTTPException(
+                status_code=503, detail=f"no healthy worker is serving model {req.model!r}"
+            )
+
+        try:
+            upstream = await http.post(
+                f"http://{chosen.address}/v1/chat/completions",
+                json=req.model_dump(mode="json"),
+                headers={REQUEST_ID_HEADER: request_id},
+                timeout=settings.forward_timeout_s,
+            )
+            upstream.raise_for_status()
+            # Parsed rather than relayed untouched, so a worker answering with
+            # something that is not a completion is caught here and not by the
+            # client. ValueError covers both a non-JSON body and a failed validation.
+            completion = ChatCompletionResponse.model_validate(upstream.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("worker %s failed to serve a request: %s", chosen.worker_id, exc)
+            raise HTTPException(
+                status_code=502, detail=f"worker {chosen.worker_id} did not complete the request"
+            ) from exc
+
+        response.headers["X-Worker-Id"] = chosen.worker_id
+        return completion
 
 
 def main() -> None:
