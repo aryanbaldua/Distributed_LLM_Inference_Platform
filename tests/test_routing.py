@@ -39,6 +39,7 @@ class FakeWorkers:
         self.served = []
         self.headers = []
         self.unreachable = set()
+        self.nonsense = set()
         self.in_flight = 0
         self.most_in_flight = 0
 
@@ -48,6 +49,8 @@ class FakeWorkers:
         self.headers.append(request.headers)
         if address in self.unreachable:
             raise httpx.ConnectError("connection refused")
+        if address in self.nonsense:
+            return httpx.Response(200, json={"not": "a completion"})
 
         self.in_flight += 1
         self.most_in_flight = max(self.most_in_flight, self.in_flight)
@@ -344,3 +347,101 @@ async def test_a_burst_is_capped_rather_than_dispatched_in_full(cluster):
 
     assert Counter(r.status_code for r in responses) == {200: 2, 503: 2}
     assert workers.most_in_flight <= 2, "no worker may be given more than it advertised"
+
+
+# --- retrying elsewhere ---------------------------------------------------------
+
+
+def busy(registry, worker_id):
+    """Put one request on a worker, to make the scheduler's first pick certain.
+
+    Several of these tests are about what happens *after* the first choice, which
+    a random tie-break between two idle workers would decide for them.
+    """
+    registry.reserve(lambda records: next(r for r in records if r.worker_id == worker_id))
+
+
+async def test_a_request_to_a_dead_worker_is_served_by_another(cluster):
+    """The reaper needs up to one timeout to notice a worker has died, and until
+    it does that worker still looks eligible. Every request arriving in that
+    window used to fail against a cluster perfectly able to serve it."""
+    registry, workers, client = cluster
+    workers.unreachable = {WORKER_A}
+    join(registry, "worker-a", WORKER_A)
+    join(registry, "worker-b", WORKER_B)
+    busy(registry, "worker-b")
+
+    response = await ask(client)
+
+    assert response.status_code == 200
+    assert workers.served == [WORKER_A, WORKER_B], "dialled the dead one first, then recovered"
+    assert response.headers["x-worker-id"] == "worker-b"
+
+
+async def test_a_retry_does_not_go_back_to_the_worker_that_just_failed(cluster):
+    """Otherwise the retry is a slower way of returning the same error."""
+    registry, workers, client = cluster
+    workers.unreachable = {WORKER_A}
+    join(registry, "worker-a", WORKER_A)
+
+    response = await ask(client)
+
+    assert response.status_code == 502
+    assert workers.served == [WORKER_A], "one worker, so there was nowhere to retry"
+
+
+async def test_retrying_stops_after_one_attempt_elsewhere(cluster):
+    registry, workers, client = cluster
+    workers.unreachable = {WORKER_A, WORKER_B}
+    join(registry, "worker-a", WORKER_A)
+    join(registry, "worker-b", WORKER_B)
+
+    response = await ask(client)
+
+    assert response.status_code == 502
+    assert sorted(workers.served) == [WORKER_A, WORKER_B], "two attempts, not three"
+
+
+async def test_a_failover_leaves_nothing_in_flight_on_either_worker(cluster):
+    """Two reservations and two releases. A slot leaked by the attempt that was
+    abandoned is the failure mode this whole path invites."""
+    registry, workers, client = cluster
+    workers.unreachable = {WORKER_A}
+    join(registry, "worker-a", WORKER_A)
+    join(registry, "worker-b", WORKER_B)
+    busy(registry, "worker-b")
+    registry.release("worker-b")
+
+    assert (await ask(client)).status_code == 200
+    assert active(registry, "worker-a") == 0
+    assert active(registry, "worker-b") == 0
+
+
+async def test_a_worker_that_answers_badly_is_not_retried(cluster):
+    """It is alive and it rejected the request, so a second worker would reject it
+    the same way. Retrying only doubles the load to reach the same error."""
+    registry, workers, client = cluster
+    workers.nonsense = {WORKER_A}
+    join(registry, "worker-a", WORKER_A)
+    join(registry, "worker-b", WORKER_B)
+    busy(registry, "worker-b")
+
+    response = await ask(client)
+
+    assert response.status_code == 502
+    assert workers.served == [WORKER_A], "the healthy worker must not have been troubled"
+
+
+async def test_a_retry_respects_capacity_like_any_other_dispatch(cluster):
+    """The fallback worker is chosen by the scheduler, so a full one is not a
+    fallback at all."""
+    registry, workers, client = cluster
+    workers.unreachable = {WORKER_A}
+    join(registry, "worker-a", WORKER_A)
+    join(registry, "worker-b", WORKER_B, max_concurrency=1)
+    busy(registry, "worker-b")
+
+    response = await ask(client)
+
+    assert response.status_code == 502
+    assert workers.served == [WORKER_A], "worker-b was full, so there was nowhere to go"
