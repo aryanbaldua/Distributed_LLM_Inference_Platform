@@ -1,7 +1,12 @@
 """Worker selection, exercised with an injected clock so nothing sleeps."""
 
 from common.schemas import WorkerRecord, WorkerStatus
-from master.scheduler import select
+from master.scheduler import (
+    ALL_WORKERS_AT_CAPACITY,
+    NO_WORKER_FOR_MODEL,
+    refusal_reason,
+    select,
+)
 
 NOW = 1000.0
 TIMEOUT = 6.0
@@ -13,12 +18,13 @@ def worker(
     status=WorkerStatus.HEALTHY,
     active_requests=0,
     last_heartbeat=NOW,
+    max_concurrency=4,
 ):
     return WorkerRecord(
         worker_id=worker_id,
         address="127.0.0.1:8001",
         model=model,
-        max_concurrency=4,
+        max_concurrency=max_concurrency,
         status=status,
         active_requests=active_requests,
         last_heartbeat=last_heartbeat,
@@ -27,6 +33,10 @@ def worker(
 
 def choose(workers, model="mock-model"):
     return select(workers, model, timeout_s=TIMEOUT, now=NOW)
+
+
+def why(workers, model="mock-model"):
+    return refusal_reason(workers, model, timeout_s=TIMEOUT, now=NOW)
 
 
 def test_an_empty_cluster_yields_no_worker():
@@ -81,3 +91,72 @@ def test_ties_are_broken_only_among_the_least_busy():
     picked = {choose(workers).worker_id for _ in range(50)}
 
     assert picked == {"w1", "w2"}
+
+
+# --- capacity -------------------------------------------------------------------
+
+
+def test_a_worker_at_capacity_is_not_eligible():
+    assert choose([worker(active_requests=4, max_concurrency=4)]) is None
+
+
+def test_the_last_free_slot_is_still_a_free_slot():
+    assert choose([worker(active_requests=3, max_concurrency=4)]) is not None
+
+
+def test_capacity_is_per_worker_rather_than_a_cluster_total():
+    """A small worker filling up must not take its larger peers with it."""
+    workers = [
+        worker("w1", active_requests=1, max_concurrency=1),
+        worker("w2", active_requests=2, max_concurrency=8),
+    ]
+
+    assert choose(workers).worker_id == "w2"
+
+
+def test_a_full_worker_does_not_win_for_being_the_least_busy():
+    """Fewest active requests is how the choice is made among workers that have
+    room, not a reason to dispatch to one that has none."""
+    workers = [
+        worker("w1", active_requests=1, max_concurrency=1),
+        worker("w2", active_requests=3, max_concurrency=8),
+    ]
+
+    assert choose(workers).worker_id == "w2"
+
+
+# --- which refusal it was -------------------------------------------------------
+
+
+def test_an_empty_cluster_is_refused_for_having_no_worker():
+    assert why([]) == NO_WORKER_FOR_MODEL
+
+
+def test_a_cluster_serving_only_other_models_is_refused_for_having_no_worker():
+    assert why([worker(model="Qwen/Qwen2.5-1.5B-Instruct")]) == NO_WORKER_FOR_MODEL
+
+
+def test_a_full_cluster_is_refused_for_capacity():
+    workers = [worker("w1", active_requests=4), worker("w2", active_requests=4)]
+
+    assert why(workers) == ALL_WORKERS_AT_CAPACITY
+
+
+def test_one_free_worker_among_full_ones_is_not_a_refusal_at_all():
+    workers = [worker("w1", active_requests=4), worker("w2", active_requests=0)]
+
+    assert choose(workers).worker_id == "w2"
+
+
+def test_a_full_but_dead_worker_is_a_missing_worker_rather_than_a_full_one():
+    """Health is checked before capacity, so an unhealthy worker is not evidence
+    that the cluster is merely busy - there is nothing to be busy."""
+    workers = [worker(active_requests=4, status=WorkerStatus.UNHEALTHY)]
+
+    assert why(workers) == NO_WORKER_FOR_MODEL
+
+
+def test_a_full_but_silent_worker_is_a_missing_worker_too():
+    workers = [worker(active_requests=4, last_heartbeat=NOW - 9.0)]
+
+    assert why(workers) == NO_WORKER_FOR_MODEL

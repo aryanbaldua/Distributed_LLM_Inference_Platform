@@ -32,6 +32,11 @@ class RequestTrace:
         self.worker_id: str | None = None
         self.worker_generation: int | None = None
 
+        # Set only when no worker was chosen. A 503 for a model nobody serves
+        # and a 503 for a cluster with no room left are the same status code and
+        # entirely different problems, so the line says which.
+        self.reason: str | None = None
+
         # Every worker's in-flight count at the instant the choice was made.
         # The field that turns "this request went to worker-b" into "this request
         # went to worker-b *because* worker-a already had three" - and, on a 503,
@@ -44,7 +49,10 @@ class RequestTrace:
         self._selected_at: float | None = None
 
     def record_selection(
-        self, chosen: WorkerRecord | None, candidates: list[WorkerRecord]
+        self,
+        chosen: WorkerRecord | None,
+        candidates: list[WorkerRecord],
+        reason: str | None = None,
     ) -> None:
         """Note what the scheduler decided and what it was looking at.
 
@@ -52,10 +60,15 @@ class RequestTrace:
         lock: it only reads the records it is handed, and the counts it copies
         are from before the chosen worker is incremented, which is what makes
         them the counts the decision was actually made on.
+
+        `reason` belongs with nothing chosen, and is the caller's to supply: it
+        comes from the scheduler, which owns the rule that produced the refusal.
         """
         self._selected_at = perf_counter()
         self.cluster_active = {worker.worker_id: worker.active_requests for worker in candidates}
-        if chosen is not None:
+        if chosen is None:
+            self.reason = reason
+        else:
             self.worker_id = chosen.worker_id
             self.worker_generation = chosen.generation
 
@@ -69,6 +82,8 @@ class RequestTrace:
             "cluster_active": self.cluster_active,
             "total_ms": _ms(now - self._started),
         }
+        if self.reason is not None:
+            fields["reason"] = self.reason
         if self._selected_at is not None:
             fields["select_ms"] = _ms(self._selected_at - self._started)
         if self.worker_id is not None:
