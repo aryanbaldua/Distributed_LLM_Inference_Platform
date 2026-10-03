@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from time import perf_counter
 from uuid import uuid4
 
 import httpx
@@ -13,6 +14,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 
 from common.config import WorkerSettings
+from common.context import REQUEST_ID_HEADER, set_request_id
 from common.logging import get_logger
 from common.schemas import (
     ChatCompletionChoice,
@@ -73,7 +75,24 @@ async def chat_completions(
     """Stand in for a model. The delay is what makes concurrent load observable:
     without it every request finishes before the next one is dispatched.
     """
+    set_request_id(request.headers.get(REQUEST_ID_HEADER))
+
+    started = perf_counter()
     await asyncio.sleep(request.app.state.delay_s)
+
+    # Logged from this side as well as the master's, because the difference
+    # between the two durations is the cost of the hop. One number cannot tell a
+    # slow model apart from a slow network.
+    log.info(
+        "generated",
+        extra={
+            "fields": {
+                "event": "generate",
+                "model": settings.model,
+                "generate_ms": round((perf_counter() - started) * 1000, 1),
+            }
+        },
+    )
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid4().hex[:24]}",
         model=settings.model,

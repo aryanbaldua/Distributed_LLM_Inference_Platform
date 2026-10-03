@@ -12,6 +12,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 from common.config import MasterSettings
+from common.context import REQUEST_ID_HEADER, RequestIdHeaderMiddleware, set_request_id
 from common.logging import get_logger
 from common.schemas import (
     ChatCompletionRequest,
@@ -56,6 +57,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LLM Inference Master", version="0.0.1", lifespan=lifespan)
+app.add_middleware(RequestIdHeaderMiddleware)
 
 
 def get_registry(request: Request) -> WorkerRegistry:
@@ -109,9 +111,21 @@ async def cluster_workers(registry: Registry) -> ClusterView:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
-    req: ChatCompletionRequest, registry: Registry, http: Http, response: Response
+    req: ChatCompletionRequest,
+    registry: Registry,
+    http: Http,
+    request: Request,
+    response: Response,
 ) -> ChatCompletionResponse:
-    """The one endpoint a client needs. Chooses a worker and forwards to it."""
+    """The one endpoint a client needs. Chooses a worker and forwards to it.
+
+    An id is minted here, or adopted from the caller's header, and every line
+    this request writes in either process carries it. Only this endpoint is
+    traced: membership traffic is a steady background hum rather than something
+    anyone follows one message at a time.
+    """
+    request_id = set_request_id(request.headers.get(REQUEST_ID_HEADER))
+
     if req.stream:
         raise HTTPException(status_code=400, detail="streaming is not supported yet")
 
@@ -127,6 +141,7 @@ async def chat_completions(
         upstream = await http.post(
             f"http://{chosen.address}/v1/chat/completions",
             json=req.model_dump(mode="json"),
+            headers={REQUEST_ID_HEADER: request_id},
             timeout=settings.forward_timeout_s,
         )
         upstream.raise_for_status()

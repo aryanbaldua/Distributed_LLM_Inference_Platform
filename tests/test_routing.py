@@ -37,6 +37,7 @@ class FakeWorkers:
     def __init__(self):
         self.delay_s = 0.0
         self.served = []
+        self.headers = []
         self.unreachable = set()
         self.in_flight = 0
         self.most_in_flight = 0
@@ -44,6 +45,7 @@ class FakeWorkers:
     async def handle(self, request):
         address = request.url.netloc.decode()
         self.served.append(address)
+        self.headers.append(request.headers)
         if address in self.unreachable:
             raise httpx.ConnectError("connection refused")
 
@@ -231,3 +233,52 @@ async def test_load_moves_away_from_a_worker_that_is_already_busy(cluster):
     response = await ask(client)
 
     assert response.headers["x-worker-id"] == "worker-b"
+
+
+# --- tracing --------------------------------------------------------------------
+
+
+async def test_a_client_is_told_the_id_its_request_was_traced_under(cluster):
+    registry, _, client = cluster
+    join(registry, "worker-a", WORKER_A)
+
+    response = await ask(client)
+
+    assert response.headers["x-request-id"]
+
+
+async def test_the_worker_is_dialled_with_the_id_the_client_was_given(cluster):
+    """The one assertion that proves the two logs can be read together."""
+    registry, workers, client = cluster
+    join(registry, "worker-a", WORKER_A)
+
+    response = await ask(client)
+
+    assert workers.headers[0]["x-request-id"] == response.headers["x-request-id"]
+
+
+async def test_an_id_the_caller_brought_is_kept_rather_than_replaced(cluster):
+    """So a trace that starts outside this service stays one trace."""
+    registry, workers, client = cluster
+    join(registry, "worker-a", WORKER_A)
+
+    response = await client.post(
+        "/v1/chat/completions",
+        json={"model": "mock-model", "messages": [{"role": "user", "content": "hello"}]},
+        headers={"X-Request-Id": "from-upstream"},
+    )
+
+    assert response.headers["x-request-id"] == "from-upstream"
+    assert workers.headers[0]["x-request-id"] == "from-upstream"
+
+
+async def test_a_refused_request_is_still_given_an_id(cluster):
+    """A 503 is the case where the id matters most: nothing downstream logged
+    anything, so the master's own line is the only record that it happened.
+    """
+    _, _, client = cluster
+
+    response = await ask(client)
+
+    assert response.status_code == 503
+    assert response.headers["x-request-id"]
