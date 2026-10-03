@@ -25,7 +25,7 @@ from common.schemas import (
 )
 from master.reaper import reaper_loop
 from master.registry import WorkerRegistry
-from master.scheduler import select
+from master.scheduler import ALL_WORKERS_AT_CAPACITY, select
 from master.trace import RequestTrace
 
 settings = MasterSettings()
@@ -110,6 +110,13 @@ async def cluster_workers(registry: Registry) -> ClusterView:
     return ClusterView(workers=registry.snapshot())
 
 
+def _refusal_detail(reason: str | None, model: str) -> str:
+    """Say which of the two refusals this is in the words a client reads."""
+    if reason == ALL_WORKERS_AT_CAPACITY:
+        return f"every worker serving model {model!r} is at capacity"
+    return f"no healthy worker is serving model {model!r}"
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
@@ -133,15 +140,15 @@ async def chat_completions(
     with RequestTrace(request_id, req.model, registry, log) as trace:
 
         def choose(workers):
-            chosen = select(workers, req.model, settings.heartbeat_timeout_s)
-            trace.record_selection(chosen, workers)
+            chosen, reason = select(workers, req.model, settings.heartbeat_timeout_s)
+            trace.record_selection(chosen, workers, reason)
             return chosen
 
         chosen = registry.reserve(choose)
         if chosen is None:
-            raise HTTPException(
-                status_code=503, detail=f"no healthy worker is serving model {req.model!r}"
-            )
+            # The same reason the log line carries, so a client chasing a 503 is
+            # told what the operator can already see rather than a generic one.
+            raise HTTPException(status_code=503, detail=_refusal_detail(trace.reason, req.model))
 
         try:
             upstream = await http.post(

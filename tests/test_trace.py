@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from common.schemas import RegisterRequest
 from master.registry import WorkerRegistry
-from master.scheduler import select
+from master.scheduler import ALL_WORKERS_AT_CAPACITY, NO_WORKER_FOR_MODEL, select
 from master.trace import RequestTrace
 
 
@@ -49,8 +49,8 @@ def serve(registry, log, model="mock-model", raising=None):
     with RequestTrace("req-1", model, registry, log) as trace:
 
         def choose(workers):
-            chosen = select(workers, model, timeout_s=60.0)
-            trace.record_selection(chosen, workers)
+            chosen, reason = select(workers, model, timeout_s=60.0)
+            trace.record_selection(chosen, workers, reason)
             return chosen
 
         chosen = registry.reserve(choose)
@@ -156,3 +156,32 @@ def test_an_unexpected_error_is_recorded_as_a_500(registry, log):
         serve(registry, log, raising=RuntimeError("boom"))
 
     assert log.lines[0]["status"] == 500
+
+
+# --- which refusal the line records ---------------------------------------------
+
+
+def test_a_request_nobody_can_serve_says_so(registry, log):
+    serve(registry, log, model="nobody-serves-this")
+
+    assert log.lines[0]["reason"] == NO_WORKER_FOR_MODEL
+
+
+def test_a_request_refused_for_room_says_that_instead(registry, log):
+    """Same status code as the line above, opposite problem."""
+    for _ in range(4):
+        registry.reserve(lambda records: next(r for r in records if r.worker_id == "worker-a"))
+    for _ in range(4):
+        registry.reserve(lambda records: next(r for r in records if r.worker_id == "worker-b"))
+
+    serve(registry, log)
+
+    assert log.lines[0]["reason"] == ALL_WORKERS_AT_CAPACITY
+    assert log.lines[0]["cluster_active"] == {"worker-a": 4, "worker-b": 4}
+
+
+def test_a_served_request_has_no_reason_to_give(registry, log):
+    """The field is the explanation for a refusal, so its absence is meaningful."""
+    serve(registry, log)
+
+    assert "reason" not in log.lines[0]
