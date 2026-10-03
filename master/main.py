@@ -110,6 +110,13 @@ async def cluster_workers(registry: Registry) -> ClusterView:
     return ClusterView(workers=registry.snapshot())
 
 
+# One retry, per design §3.3. A fixed small number rather than a setting: the
+# ceiling exists so a cluster that is failing everywhere cannot be made to work
+# harder by a client that keeps asking, and that argument does not change with
+# deployment.
+MAX_ATTEMPTS = 2
+
+
 def _refusal_detail(reason: str | None, model: str) -> str:
     """Say which of the two refusals this is in the words a client reads."""
     if reason == ALL_WORKERS_AT_CAPACITY:
@@ -138,38 +145,81 @@ async def chat_completions(
         raise HTTPException(status_code=400, detail="streaming is not supported yet")
 
     with RequestTrace(request_id, req.model, registry, log) as trace:
+        # Workers this request has already been sent to. A retry has to land
+        # somewhere else; sending it back to the worker that just refused the
+        # connection is a slower way of returning the same error.
+        tried: set[str] = set()
 
         def choose(workers):
-            chosen, reason = select(workers, req.model, settings.heartbeat_timeout_s)
-            trace.record_selection(chosen, workers, reason)
+            available = [worker for worker in workers if worker.worker_id not in tried]
+            chosen, reason = select(available, req.model, settings.heartbeat_timeout_s)
+            # The reason is kept from the first pass only, because that is the
+            # only pass whose emptiness is a 503. After an attempt there is simply
+            # nothing left to retry on, and the forwarding failure is what the
+            # client hears about.
+            #
+            # The counts come from the full cluster rather than `available`: they
+            # are there to explain the state of the cluster, not of this retry.
+            trace.record_selection(chosen, workers, None if tried else reason)
             return chosen
 
-        chosen = registry.reserve(choose)
-        if chosen is None:
-            # The same reason the log line carries, so a client chasing a 503 is
-            # told what the operator can already see rather than a generic one.
-            raise HTTPException(status_code=503, detail=_refusal_detail(trace.reason, req.model))
+        unreachable: Exception | None = None
 
-        try:
-            upstream = await http.post(
-                f"http://{chosen.address}/v1/chat/completions",
-                json=req.model_dump(mode="json"),
-                headers={REQUEST_ID_HEADER: request_id},
-                timeout=settings.forward_timeout_s,
-            )
-            upstream.raise_for_status()
-            # Parsed rather than relayed untouched, so a worker answering with
-            # something that is not a completion is caught here and not by the
-            # client. ValueError covers both a non-JSON body and a failed validation.
-            completion = ChatCompletionResponse.model_validate(upstream.json())
-        except (httpx.HTTPError, ValueError) as exc:
-            log.warning("worker %s failed to serve a request: %s", chosen.worker_id, exc)
+        for _ in range(MAX_ATTEMPTS):
+            chosen = registry.reserve(choose)
+            if chosen is None:
+                break
+            tried.add(chosen.worker_id)
+
+            try:
+                upstream = await http.post(
+                    f"http://{chosen.address}/v1/chat/completions",
+                    json=req.model_dump(mode="json"),
+                    headers={REQUEST_ID_HEADER: request_id},
+                    timeout=settings.forward_timeout_s,
+                )
+                upstream.raise_for_status()
+                # Parsed rather than relayed untouched, so a worker answering with
+                # something that is not a completion is caught here and not by the
+                # client. ValueError covers both a non-JSON body and a failed validation.
+                completion = ChatCompletionResponse.model_validate(upstream.json())
+            except httpx.TransportError as exc:
+                # The worker never answered, so nothing has been generated and
+                # nothing has been sent to the client: another worker can still
+                # serve this request from the start. Retried because a worker
+                # that died seconds ago stays eligible until the reaper notices,
+                # and every request that arrives in that window would otherwise
+                # fail against a cluster that is perfectly able to serve it.
+                log.warning("worker %s could not be reached: %s", chosen.worker_id, exc)
+                unreachable = exc
+                trace.attempt_failed()
+                continue
+            except (httpx.HTTPError, ValueError) as exc:
+                # The worker answered, badly. Not retried: a rejected request is
+                # rejected everywhere, so a second attempt doubles the load to
+                # arrive at the same error more slowly.
+                log.warning("worker %s failed to serve a request: %s", chosen.worker_id, exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"worker {chosen.worker_id} did not complete the request",
+                ) from exc
+
+            response.headers["X-Worker-Id"] = chosen.worker_id
+            return completion
+
+        if unreachable is not None:
             raise HTTPException(
-                status_code=502, detail=f"worker {chosen.worker_id} did not complete the request"
-            ) from exc
+                status_code=502,
+                detail=(
+                    f"no worker serving model {req.model!r} could be reached "
+                    f"(tried {', '.join(sorted(tried))})"
+                ),
+            ) from unreachable
 
-        response.headers["X-Worker-Id"] = chosen.worker_id
-        return completion
+        # Nothing was ever dispatched, so this is the cluster's own answer.
+        # The same reason the log line carries, so a client chasing a 503 is
+        # told what the operator can already see rather than a generic one.
+        raise HTTPException(status_code=503, detail=_refusal_detail(trace.reason, req.model))
 
 
 def main() -> None:
