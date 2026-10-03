@@ -5,6 +5,8 @@ being checked is that release and the recorded counts agree with the registry's
 own accounting.
 """
 
+from time import sleep
+
 import pytest
 from fastapi import HTTPException
 
@@ -191,3 +193,108 @@ def test_a_served_request_has_no_reason_to_give(registry, log):
     serve(registry, log)
 
     assert "reason" not in log.lines[0]
+
+
+# --- a request that was retried --------------------------------------------------
+
+
+def serve_after_one_failure(registry, log, model="mock-model", pause=0.0):
+    """Two attempts through one trace, shaped the way the handler shapes them.
+
+    The first attempt is abandoned the way an unreachable worker abandons one:
+    its slot goes back and the worker is excluded from the next choice.
+    """
+    tried = set()
+    with RequestTrace("req-1", model, registry, log) as trace:
+
+        def choose(workers):
+            available = [w for w in workers if w.worker_id not in tried]
+            chosen = select(available, model, timeout_s=60.0)
+            reason = (
+                refusal_reason(available, model, 60.0) if chosen is None and not tried else None
+            )
+            trace.record_selection(chosen, workers, reason)
+            return chosen
+
+        served = None
+        for attempt in (1, 2):
+            chosen = registry.reserve(choose)
+            if chosen is None:
+                break
+            tried.add(chosen.worker_id)
+            if attempt == 1:
+                sleep(pause)
+                trace.attempt_failed()
+                continue
+            served = chosen
+        return served
+
+
+def test_a_request_that_worked_first_time_took_one_attempt(registry, log):
+    serve(registry, log)
+
+    assert log.lines[0]["attempts"] == 1
+
+
+def test_a_request_that_found_no_worker_took_none(registry, log):
+    serve(registry, log, model="nobody-serves-this")
+
+    assert log.lines[0]["attempts"] == 0
+
+
+def test_a_retried_request_counts_both_attempts(registry, log):
+    served = serve_after_one_failure(registry, log)
+
+    assert served is not None
+    assert log.lines[0]["attempts"] == 2
+
+
+def test_a_retried_request_names_the_worker_that_finished_it(registry, log):
+    served = serve_after_one_failure(registry, log)
+
+    assert log.lines[0]["worker_id"] == served.worker_id
+    assert log.lines[0]["status"] == 200
+
+
+def test_a_failover_gives_back_both_slots(registry, log):
+    serve_after_one_failure(registry, log)
+
+    assert set(in_flight(registry).values()) == {0}
+
+
+def test_an_abandoned_attempt_is_not_released_a_second_time_on_the_way_out(registry, log):
+    """Two reserves and two releases, not two reserves and three releases.
+
+    The counts other requests are holding are what makes this visible: a slot
+    released twice is taken from whoever else was using that worker, which leaves
+    it looking emptier than it is and pulls traffic it cannot serve.
+    """
+    registry.reserve(lambda records: next(r for r in records if r.worker_id == "worker-a"))
+    for _ in range(2):
+        registry.reserve(lambda records: next(r for r in records if r.worker_id == "worker-b"))
+
+    serve_after_one_failure(registry, log)
+
+    assert in_flight(registry) == {"worker-a": 1, "worker-b": 2}
+
+
+def test_a_retry_that_finds_nowhere_to_go_still_names_who_failed(registry, log):
+    """The slot went back, but the worker is the whole content of the 502."""
+    for _ in range(4):
+        registry.reserve(lambda records: next(r for r in records if r.worker_id == "worker-b"))
+
+    served = serve_after_one_failure(registry, log)
+
+    assert served is None, "worker-b was full, so there was nowhere to retry"
+    assert log.lines[0]["worker_id"] == "worker-a"
+    assert log.lines[0]["attempts"] == 1
+
+
+def test_a_failed_attempt_does_not_inflate_the_time_spent_choosing(registry, log):
+    """select_ms is how long scheduling took, not how long the request spent
+    discovering that its first worker was dead."""
+    serve_after_one_failure(registry, log, pause=0.05)
+
+    line = log.lines[0]
+    assert line["select_ms"] < 50, "the first selection, not the second"
+    assert line["total_ms"] >= 50, "but the whole request did take that long"
