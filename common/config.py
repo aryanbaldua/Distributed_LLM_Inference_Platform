@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,9 +48,22 @@ class WorkerSettings(BaseSettings):
     register_retry_s: float = 2.0
     register_backoff_max_s: float = 30.0
 
-    # Stands in for generation time until a real model is wired up. Adjustable
-    # at runtime through POST /debug/delay, to make one worker the slow one.
+    # Where answers come from. "mock" echoes the prompt after a delay and needs
+    # nothing installed, which keeps the tests and CI fast. "ollama" sends the
+    # request to a real model; `model` must then be a name Ollama has pulled.
+    backend: Literal["mock", "ollama"] = "mock"
+
+    # Stands in for generation time on the mock backend. Adjustable at runtime
+    # through POST /debug/delay, to make one worker the slow one.
     mock_delay_s: float = 0.25
+
+    ollama_url: str = "http://127.0.0.1:11434"
+
+    # Kept below the master's forward_timeout_s on purpose. If the master gave
+    # up first it would see a timeout, take the worker for dead and retry the
+    # whole generation elsewhere; giving up here first means it hears an error
+    # instead, which it does not retry.
+    ollama_timeout_s: float = 55.0
 
     @property
     def advertised_address(self) -> str:

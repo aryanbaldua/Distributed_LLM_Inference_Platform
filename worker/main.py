@@ -22,6 +22,7 @@ from common.schemas import (
     ChatCompletionResponse,
     ChatMessage,
 )
+from worker import ollama
 from worker.master_client import MasterClient
 
 settings = WorkerSettings()
@@ -31,10 +32,11 @@ log = get_logger(f"worker:{settings.worker_id}")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
-        "worker %s up at %s serving %s",
+        "worker %s up at %s serving %s (%s backend)",
         settings.worker_id,
         settings.advertised_address,
         settings.model,
+        settings.backend,
     )
 
     # Held on app.state rather than in settings because /debug/delay changes it.
@@ -72,13 +74,20 @@ async def healthz() -> dict:
 async def chat_completions(
     req: ChatCompletionRequest, request: Request
 ) -> ChatCompletionResponse:
-    """Stand in for a model. The delay is what makes concurrent load observable:
-    without it every request finishes before the next one is dispatched.
-    """
+    """Answer from whichever backend this worker was started with."""
     set_request_id(request.headers.get(REQUEST_ID_HEADER))
 
     started = perf_counter()
-    await asyncio.sleep(request.app.state.delay_s)
+    if settings.backend == "ollama":
+        completion = await ollama.complete(
+            request.app.state.http,
+            settings.ollama_url,
+            settings.model,
+            req,
+            settings.ollama_timeout_s,
+        )
+    else:
+        completion = await _mock_complete(req, request.app.state.delay_s)
 
     # Logged from this side as well as the master's, because the difference
     # between the two durations is the cost of the hop. One number cannot tell a
@@ -88,11 +97,20 @@ async def chat_completions(
         extra={
             "fields": {
                 "event": "generate",
+                "backend": settings.backend,
                 "model": settings.model,
                 "generate_ms": round((perf_counter() - started) * 1000, 1),
             }
         },
     )
+    return completion
+
+
+async def _mock_complete(req: ChatCompletionRequest, delay_s: float) -> ChatCompletionResponse:
+    """Stand in for a model. The delay is what makes concurrent load observable:
+    without it every request finishes before the next one is dispatched.
+    """
+    await asyncio.sleep(delay_s)
     return ChatCompletionResponse(
         id=f"chatcmpl-{uuid4().hex[:24]}",
         model=settings.model,
