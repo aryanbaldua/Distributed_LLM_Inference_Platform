@@ -6,14 +6,16 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 
 from common.config import MasterSettings
 from common.context import REQUEST_ID_HEADER, RequestIdHeaderMiddleware, set_request_id
-from common.logging import get_logger
+from common.logging import get_logger, log_buffer
 from common.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -22,6 +24,8 @@ from common.schemas import (
     HeartbeatResponse,
     RegisterRequest,
     RegisterResponse,
+    WorkerRecord,
+    WorkerStatus,
 )
 from master.reaper import reaper_loop
 from master.registry import WorkerRegistry
@@ -108,6 +112,64 @@ async def worker_heartbeat(req: HeartbeatRequest, registry: Registry) -> Heartbe
 async def cluster_workers(registry: Registry) -> ClusterView:
     """Full registry dump. The operator view, and the evidence for every demo."""
     return ClusterView(workers=registry.snapshot())
+
+
+# How long the command center waits for one worker's logs. Short, because the
+# page polls every second and one slow worker should not stall everyone's lines.
+WORKER_LOGS_TIMEOUT_S = 1.0
+
+UI_PAGE = Path(__file__).parent / "ui" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse("/ui")
+
+
+@app.get("/ui", include_in_schema=False)
+async def command_center() -> FileResponse:
+    """The command center: chat with the master, watch the workers and the logs."""
+    return FileResponse(UI_PAGE)
+
+
+@app.get("/debug/logs")
+async def debug_logs(
+    registry: Registry, http: Http, limit: int = Query(300, ge=1, le=1000)
+) -> dict:
+    """The newest log lines from the master and every healthy worker, merged.
+
+    Fetched from the workers on demand rather than pushed to the master, so the
+    workers need nothing beyond an endpoint that reads their own buffer. Unhealthy
+    workers are skipped: the reaper has already given up on them, and waiting on
+    a dead address every second would only slow the page down. A healthy worker
+    that does not answer is named in `unreachable` instead of failing the call.
+    """
+    healthy = [w for w in registry.snapshot() if w.status is WorkerStatus.HEALTHY]
+    fetched = await asyncio.gather(*(_worker_logs(http, worker, limit) for worker in healthy))
+
+    lines = [{**line, "source": "master"} for line in log_buffer.recent(limit)]
+    unreachable = []
+    for worker, worker_lines in zip(healthy, fetched):
+        if worker_lines is None:
+            unreachable.append(worker.worker_id)
+        else:
+            lines.extend({**line, "source": worker.worker_id} for line in worker_lines)
+
+    lines.sort(key=lambda line: line.get("t", 0))
+    return {"lines": lines, "unreachable": unreachable}
+
+
+async def _worker_logs(http: httpx.AsyncClient, worker: WorkerRecord, limit: int):
+    try:
+        response = await http.get(
+            f"http://{worker.address}/debug/logs",
+            params={"limit": limit},
+            timeout=WORKER_LOGS_TIMEOUT_S,
+        )
+        response.raise_for_status()
+        return response.json()["lines"]
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
 
 
 # One retry, per design §3.3. A fixed small number rather than a setting: the

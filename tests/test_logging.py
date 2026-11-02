@@ -11,7 +11,7 @@ import logging
 import pytest
 
 from common.context import _request_id, set_request_id
-from common.logging import JsonFormatter, TextFormatter
+from common.logging import BufferHandler, JsonFormatter, LogBuffer, TextFormatter
 
 
 @pytest.fixture(autouse=True)
@@ -97,3 +97,45 @@ def test_the_text_format_keeps_the_id_and_the_fields():
 
     assert "request_id=abc123" in line
     assert "status=503" in line
+
+
+# --- the in-memory buffer -------------------------------------------------------
+
+
+def test_a_line_carries_a_timestamp_fine_enough_to_merge_processes_by():
+    assert isinstance(formatted()["t"], float)
+
+
+def test_the_buffer_keeps_what_the_stream_would_print():
+    buffer = LogBuffer()
+    set_request_id("abc123")
+
+    BufferHandler(buffer).emit(record(fields={"worker": object(), "status": 200}))
+
+    [entry] = buffer.recent(10)
+    assert entry["msg"] == "hello"
+    assert entry["request_id"] == "abc123"
+    assert entry["status"] == 200
+    assert isinstance(entry["worker"], str), "stored already serializable, as its repr"
+
+
+def test_lines_are_numbered_and_tagged_with_this_process():
+    buffer = LogBuffer()
+    for _ in range(3):
+        buffer.append({"msg": "x"})
+
+    assert [entry["seq"] for entry in buffer.recent(10)] == [0, 1, 2]
+    assert {entry["boot"] for entry in buffer.recent(10)} == {buffer.boot}
+
+
+def test_a_restarted_process_is_told_apart_by_its_boot_id():
+    assert LogBuffer().boot != LogBuffer().boot
+
+
+def test_the_buffer_keeps_only_the_newest_lines():
+    buffer = LogBuffer(maxlen=3)
+    for index in range(5):
+        buffer.append({"msg": str(index)})
+
+    assert [entry["msg"] for entry in buffer.recent(10)] == ["2", "3", "4"]
+    assert [entry["msg"] for entry in buffer.recent(2)] == ["3", "4"]
