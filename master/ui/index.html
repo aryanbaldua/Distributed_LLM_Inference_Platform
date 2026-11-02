@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Command Center</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #dfe3e8; --text: #1d232b; --muted: #6b7480;
+    --accent: #2f6fde; --ok: #1f9d55; --bad: #d64545; --warn: #c98a00;
+    --user-bg: #e8f0fe; --bot-bg: #f1f3f5; --err-bg: #fdecec; --code: #f3f4f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #161a20; --border: #2a3039; --text: #e3e7ec; --muted: #8b95a1;
+      --accent: #6ea0ff; --ok: #3ccf7a; --bad: #ff6b6b; --warn: #e3b341;
+      --user-bg: #1d2a42; --bot-bg: #1d2229; --err-bg: #3a1d1f; --code: #1d2229;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .muted { color: var(--muted); }
+  main {
+    flex: 1; min-height: 0; display: grid; gap: 12px; padding: 12px;
+    grid-template-columns: minmax(320px, 2fr) 3fr; grid-template-rows: auto 1fr;
+    grid-template-areas: "chat workers" "chat logs";
+  }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 60vh auto 60vh; grid-template-areas: "chat" "workers" "logs"; }
+  }
+  section {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  }
+  section > h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+    margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  #chat { grid-area: chat; } #workers { grid-area: workers; } #logs { grid-area: logs; }
+  button, select, input, textarea {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
+  }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .spacer { flex: 1; }
+
+  /* chat */
+  #messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 92%; padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: var(--user-bg); }
+  .msg.bot { align-self: flex-start; background: var(--bot-bg); }
+  .msg.err { align-self: flex-start; background: var(--err-bg); }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 4px; white-space: normal; }
+  .burst { align-self: stretch; background: var(--bot-bg); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+  .burst div { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  #composer { border-top: 1px solid var(--border); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  #composer textarea { width: 100%; resize: vertical; min-height: 56px; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .rid {
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--accent);
+    cursor: pointer; text-decoration: underline dotted;
+  }
+
+  /* workers */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { font-weight: 500; color: var(--muted); font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  .pill { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 10px; color: #fff; }
+  .pill.HEALTHY { background: var(--ok); } .pill.UNHEALTHY { background: var(--bad); }
+  .load { display: inline-flex; align-items: center; gap: 6px; }
+  .bar { width: 60px; height: 6px; border-radius: 3px; background: var(--code); overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar.full > i { background: var(--warn); }
+  .empty { padding: 14px 12px; color: var(--muted); }
+
+  /* logs */
+  #log-lines { flex: 1; overflow-y: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; padding: 6px 0; }
+  .line { padding: 1px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .line:hover { background: var(--code); }
+  .line .src { font-weight: 600; }
+  .line.WARNING .lvl { color: var(--warn); } .line.ERROR .lvl { color: var(--bad); }
+  .line .f { color: var(--muted); }
+  .chip {
+    display: inline-flex; gap: 4px; align-items: center; font-size: 12px; padding: 2px 8px;
+    border-radius: 10px; background: var(--user-bg);
+  }
+  .chip button { border: none; background: none; padding: 0 2px; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Command center</h1>
+  <span class="dot" id="master-dot"></span>
+  <span class="muted" id="master-status">connecting to master…</span>
+</header>
+
+<main>
+  <section id="chat">
+    <h2>Talk to the master</h2>
+    <div id="messages"></div>
+    <div id="composer">
+      <div class="row">
+        <label class="muted" for="model">Model</label>
+        <select id="model"></select>
+        <label class="muted" for="max-tokens">Max tokens</label>
+        <input id="max-tokens" type="number" min="1" value="256" style="width: 80px">
+        <span class="spacer"></span>
+        <button id="clear-chat" title="Forget the conversation">Clear</button>
+      </div>
+      <textarea id="prompt" placeholder="Ask something… (Enter to send, Shift+Enter for a new line)"></textarea>
+      <div class="row">
+        <button class="primary" id="send">Send</button>
+        <span class="spacer"></span>
+        <label class="muted" for="burst-n">Send</label>
+        <input id="burst-n" type="number" min="2" max="50" value="5" style="width: 60px">
+        <button id="burst" title="Send this prompt N times at once, as separate requests, to watch load spread">copies at once</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="workers">
+    <h2>Workers <span class="muted" id="worker-count"></span></h2>
+    <div class="table-wrap" id="worker-table"></div>
+  </section>
+
+  <section id="logs">
+    <h2>Logs <span class="muted" id="log-note"></span></h2>
+    <div class="toolbar">
+      <select id="f-source"><option value="">all sources</option></select>
+      <select id="f-level">
+        <option value="">all levels</option><option>INFO</option><option>WARNING</option><option>ERROR</option>
+      </select>
+      <input id="f-text" placeholder="filter text" style="width: 160px">
+      <span id="f-rid"></span>
+      <span class="spacer"></span>
+      <label class="muted"><input type="checkbox" id="follow" checked> follow</label>
+      <button id="clear-logs">Clear</button>
+    </div>
+    <div id="log-lines"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+
+// --- chat ---------------------------------------------------------------------
+
+// The whole conversation is sent with every request, so follow-up questions
+// have context. A request that fails is taken back out, so it is not resent.
+let history = [];
+
+function ridLink(requestId) {
+  const link = el("span", "rid", requestId);
+  link.title = "Show only this request's log lines";
+  link.onclick = () => setRidFilter(requestId);
+  return link;
+}
+
+function addMessage(cls, text) {
+  const box = el("div", "msg " + cls, text);
+  $("messages").appendChild(box);
+  $("messages").scrollTop = $("messages").scrollHeight;
+  return box;
+}
+
+async function chat(messages) {
+  const started = performance.now();
+  const response = await fetch("/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: $("model").value,
+      messages,
+      max_tokens: Number($("max-tokens").value) || 256,
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  return {
+    ok: response.ok,
+    status: response.status,
+    body,
+    ms: Math.round(performance.now() - started),
+    workerId: response.headers.get("X-Worker-Id"),
+    requestId: response.headers.get("X-Request-Id"),
+  };
+}
+
+async function send() {
+  const text = $("prompt").value.trim();
+  if (!text || !$("model").value) return;
+  $("prompt").value = "";
+  history.push({ role: "user", content: text });
+  addMessage("user", text);
+
+  const pending = addMessage("bot", "…");
+  const started = performance.now();
+  const timer = setInterval(() => {
+    pending.textContent = `thinking… ${((performance.now() - started) / 1000).toFixed(1)}s`;
+  }, 100);
+  $("send").disabled = true;
+
+  try {
+    const result = await chat(history);
+    clearInterval(timer);
+    pending.textContent = "";
+    if (result.ok) {
+      const answer = result.body.choices[0].message.content;
+      history.push({ role: "assistant", content: answer });
+      pending.appendChild(document.createTextNode(answer));
+      const meta = el("div", "meta", `${result.workerId} · ${result.body.model} · ${result.ms} ms · `);
+      meta.appendChild(ridLink(result.requestId));
+      pending.appendChild(meta);
+    } else {
+      history.pop();
+      pending.className = "msg err";
+      pending.appendChild(document.createTextNode(`${result.status}: ${result.body.detail ?? "error"}`));
+      const meta = el("div", "meta", `${result.ms} ms · `);
+      if (result.requestId) meta.appendChild(ridLink(result.requestId));
+      pending.appendChild(meta);
+    }
+  } catch (err) {
+    clearInterval(timer);
+    history.pop();
+    pending.className = "msg err";
+    pending.textContent = `could not reach the master: ${err}`;
+  } finally {
+    $("send").disabled = false;
+    $("messages").scrollTop = $("messages").scrollHeight;
+  }
+}
+
+// Separate one-message requests, not part of the conversation: the point is
+// to see where each one lands and which are turned away.
+async function burst() {
+  const text = $("prompt").value.trim() || "hello";
+  const n = Math.max(2, Math.min(50, Number($("burst-n").value) || 5));
+  const card = el("div", "burst");
+  card.appendChild(el("strong", null, `${n} copies of “${text.slice(0, 60)}” to ${$("model").value}`));
+  const rows = Array.from({ length: n }, (_, i) => {
+    const row = el("div", null, `#${i + 1} …`);
+    card.appendChild(row);
+    return row;
+  });
+  $("messages").appendChild(card);
+  $("messages").scrollTop = $("messages").scrollHeight;
+
+  await Promise.all(rows.map(async (row, i) => {
+    try {
+      const result = await chat([{ role: "user", content: text }]);
+      row.textContent = result.ok
+        ? `#${i + 1} ${result.workerId} ${result.ms} ms `
+        : `#${i + 1} ${result.status} ${result.body.detail ?? ""} `;
+      if (result.requestId) row.appendChild(ridLink(result.requestId));
+    } catch (err) {
+      row.textContent = `#${i + 1} failed: ${err}`;
+    }
+  }));
+}
+
+$("send").onclick = send;
+$("burst").onclick = burst;
+$("clear-chat").onclick = () => { history = []; $("messages").replaceChildren(); };
+$("prompt").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }
+});
+
+// --- workers ------------------------------------------------------------------
+
+function setMasterStatus(ok, text) {
+  $("master-dot").className = "dot " + (ok ? "ok" : "bad");
+  $("master-status").textContent = text;
+}
+
+function updateModels(workers) {
+  const models = [...new Set(workers.map((w) => w.model))].sort();
+  const select = $("model");
+  const current = [...select.options].map((o) => o.value);
+  if (models.join() === current.join()) return;
+  const chosen = select.value;
+  select.replaceChildren(...models.map((m) => el("option", null, m)));
+  if (models.includes(chosen)) select.value = chosen;
+}
+
+function renderWorkers(view) {
+  const workers = view.workers;
+  const healthy = workers.filter((w) => w.status === "HEALTHY").length;
+  $("worker-count").textContent = workers.length ? `${healthy}/${workers.length} healthy` : "";
+  if (!workers.length) {
+    $("worker-table").replaceChildren(el("div", "empty", "No workers registered yet."));
+    return;
+  }
+  const table = el("table");
+  const head = el("tr");
+  for (const h of ["Worker", "Model", "Status", "Load", "Heartbeat", "Gen"]) head.appendChild(el("th", null, h));
+  table.appendChild(head);
+  for (const w of workers) {
+    const row = el("tr");
+    row.appendChild(el("td", null, w.worker_id));
+    row.appendChild(el("td", null, w.model));
+    const status = el("td");
+    status.appendChild(el("span", "pill " + w.status, w.status));
+    row.appendChild(status);
+
+    const load = el("td");
+    const wrap = el("span", "load");
+    const bar = el("span", "bar" + (w.active_requests >= w.max_concurrency ? " full" : ""));
+    const fill = el("i");
+    fill.style.width = `${Math.min(100, (100 * w.active_requests) / w.max_concurrency)}%`;
+    bar.appendChild(fill);
+    wrap.append(bar, el("span", null, `${w.active_requests}/${w.max_concurrency}`));
+    load.appendChild(wrap);
+    row.appendChild(load);
+
+    // Measured on the master's clock, so this page's clock never matters.
+    row.appendChild(el("td", null, `${(view.as_of - w.last_heartbeat).toFixed(1)}s ago`));
+    row.appendChild(el("td", null, String(w.generation)));
+    table.appendChild(row);
+  }
+  $("worker-table").replaceChildren(table);
+}
+
+async function pollWorkers() {
+  try {
+    const response = await fetch("/cluster/workers");
+    const view = await response.json();
+    setMasterStatus(true, "master connected");
+    updateModels(view.workers);
+    renderWorkers(view);
+  } catch (err) {
+    setMasterStatus(false, "master unreachable");
+  }
+}
+
+// --- logs ---------------------------------------------------------------------
+
+const MAX_LINES = 3000;
+const SKIP_FIELDS = new Set(["ts", "t", "level", "logger", "msg", "seq", "boot", "source", "request_id"]);
+const PALETTE = ["#2f6fde", "#1f9d55", "#c2410c", "#9333ea", "#0891b2", "#be185d", "#4d7c0f"];
+const seen = new Set();
+const sourceColors = { master: "var(--text)" };
+let logLines = [];
+let ridFilter = null;
+
+function colorFor(source) {
+  if (!(source in sourceColors)) {
+    sourceColors[source] = PALETTE[(Object.keys(sourceColors).length - 1) % PALETTE.length];
+    $("f-source").appendChild(el("option", null, source));
+  }
+  return sourceColors[source];
+}
+
+function setRidFilter(requestId) {
+  ridFilter = requestId;
+  const holder = $("f-rid");
+  holder.replaceChildren();
+  if (requestId) {
+    const chip = el("span", "chip", `request ${requestId}`);
+    const close = el("button", null, "×");
+    close.title = "Show every request again";
+    close.onclick = () => setRidFilter(null);
+    chip.appendChild(close);
+    holder.appendChild(chip);
+  }
+  renderLogs();
+}
+
+function visible(line) {
+  const source = $("f-source").value;
+  const level = $("f-level").value;
+  const text = $("f-text").value.toLowerCase();
+  if (source && line.source !== source) return false;
+  if (level && line.level !== level) return false;
+  if (ridFilter && line.request_id !== ridFilter) return false;
+  if (text && !JSON.stringify(line).toLowerCase().includes(text)) return false;
+  return true;
+}
+
+function renderLine(line) {
+  const row = el("div", "line " + line.level);
+  row.appendChild(el("span", "muted", line.ts + " "));
+  const src = el("span", "src", line.source.padEnd(14) + " ");
+  src.style.color = colorFor(line.source);
+  row.appendChild(src);
+  row.appendChild(el("span", "lvl", line.level.padEnd(7)));
+  row.appendChild(document.createTextNode(line.msg + " "));
+  if (line.request_id) {
+    row.appendChild(ridLink(line.request_id));
+    row.appendChild(document.createTextNode(" "));
+  }
+  const fields = Object.entries(line)
+    .filter(([key]) => !SKIP_FIELDS.has(key))
+    .map(([key, value]) => `${key}=${typeof value === "object" ? JSON.stringify(value) : value}`);
+  if (fields.length) row.appendChild(el("span", "f", fields.join(" ")));
+  return row;
+}
+
+function scrollIfFollowing() {
+  if ($("follow").checked) $("log-lines").scrollTop = $("log-lines").scrollHeight;
+}
+
+function renderLogs() {
+  $("log-lines").replaceChildren(...logLines.filter(visible).map(renderLine));
+  scrollIfFollowing();
+}
+
+async function pollLogs() {
+  try {
+    const response = await fetch("/debug/logs?limit=300");
+    const data = await response.json();
+    $("log-note").textContent = data.unreachable.length
+      ? `no logs from ${data.unreachable.join(", ")}`
+      : "";
+
+    const fresh = [];
+    for (const line of data.lines) {
+      const key = `${line.source}/${line.boot}/${line.seq}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      fresh.push(line);
+    }
+    if (!fresh.length) return;
+    fresh.sort((a, b) => a.t - b.t);
+
+    // Lines from different processes can arrive out of order across polls, so
+    // the list is re-sorted, and redrawn whole when that moved anything.
+    const lastT = logLines.length ? logLines[logLines.length - 1].t : 0;
+    logLines.push(...fresh);
+    const inOrder = fresh.every((line) => line.t >= lastT);
+    if (!inOrder) logLines.sort((a, b) => a.t - b.t);
+    if (logLines.length > MAX_LINES) logLines = logLines.slice(-MAX_LINES);
+
+    if (inOrder) {
+      for (const line of fresh) {
+        if (visible(line)) $("log-lines").appendChild(renderLine(line));
+      }
+      while ($("log-lines").childElementCount > MAX_LINES) $("log-lines").firstChild.remove();
+      scrollIfFollowing();
+    } else {
+      renderLogs();
+    }
+  } catch (err) {
+    $("log-note").textContent = "could not load logs";
+  }
+}
+
+for (const id of ["f-source", "f-level", "f-text"]) $(id).addEventListener("input", renderLogs);
+$("clear-logs").onclick = () => { logLines = []; renderLogs(); };
+
+// --- polling ------------------------------------------------------------------
+
+// Each poll waits for the previous one, so a slow master is not piled on.
+function every(ms, fn) {
+  const tick = async () => { await fn(); setTimeout(tick, ms); };
+  tick();
+}
+every(1000, pollWorkers);
+every(1000, pollLogs);
+</script>
+</body>
+</html>

@@ -10,12 +10,12 @@ from time import perf_counter
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from pydantic import BaseModel, Field
 
 from common.config import WorkerSettings
 from common.context import REQUEST_ID_HEADER, set_request_id
-from common.logging import get_logger
+from common.logging import get_logger, log_buffer
 from common.schemas import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -133,6 +133,14 @@ async def set_delay(setting: DelaySetting, request: Request) -> DelaySetting:
     request.app.state.delay_s = setting.delay_s
     log.info("mock delay now %.2fs", setting.delay_s)
     return setting
+
+
+@app.get("/debug/logs")
+async def debug_logs(limit: int = Query(300, ge=1, le=1000)) -> dict:
+    """This worker's newest log lines. Read by the master, which merges every
+    worker's into the one stream the command center shows.
+    """
+    return {"lines": log_buffer.recent(limit)}
 
 
 def main() -> None:
