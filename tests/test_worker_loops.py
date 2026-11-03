@@ -177,7 +177,7 @@ async def test_a_master_outage_does_not_take_the_worker_down_with_it():
 
 
 async def test_a_long_outage_is_reported_once_and_so_is_the_recovery():
-    """At a 2s interval, a master down for ten minutes is three hundred
+    """At a 4s interval, a master down for ten minutes is a hundred and fifty
     identical lines burying every transition worth reading."""
     reachable = False
 
