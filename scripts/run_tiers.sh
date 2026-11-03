@@ -31,12 +31,13 @@ trap cleanup EXIT INT TERM
 
 MASTER_PORT=8000 python -m master.main & pids+=($!)
 
-# One request at a time per worker: on one laptop the three share the same
-# memory and cores, and a real model cannot run eight generations at once.
+# Three requests at a time per worker. Ollama only generates them side by side
+# when it was started with OLLAMA_NUM_PARALLEL of at least 3; below that it
+# queues them, and the extra requests wait their turn inside Ollama instead.
 for tier in "${tiers[@]}"; do
   read -r name port model <<<"$tier"
   WORKER_WORKER_ID="worker-$name" WORKER_PORT="$port" WORKER_BACKEND=ollama \
-    WORKER_MODEL="$model" WORKER_MAX_CONCURRENCY=1 WORKER_OLLAMA_URL="$OLLAMA_URL" \
+    WORKER_MODEL="$model" WORKER_MAX_CONCURRENCY=3 WORKER_OLLAMA_URL="$OLLAMA_URL" \
     python -m worker.main & pids+=($!)
 done
 

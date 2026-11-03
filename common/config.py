@@ -38,7 +38,7 @@ class WorkerSettings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8001
     model: str = "mock-model"
-    max_concurrency: int = 8
+    max_concurrency: int = 3
 
     master_url: str = "http://127.0.0.1:8000"
 
