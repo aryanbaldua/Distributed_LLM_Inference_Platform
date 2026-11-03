@@ -26,7 +26,7 @@ class RegisterRequest(BaseModel):
     worker_id: str
     address: str = Field(description="host:port the master forwards inference to")
     model: str = Field(description="exact model id served, e.g. 'Qwen/Qwen2.5-1.5B-Instruct'")
-    max_concurrency: int = Field(default=8, ge=1)
+    max_concurrency: int = Field(default=3, ge=1)
 
 
 class RegisterResponse(BaseModel):
