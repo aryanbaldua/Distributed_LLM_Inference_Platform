@@ -14,8 +14,8 @@ class MasterSettings(BaseSettings):
     port: int = 8000
 
     # Timing policy lives here and is pushed to workers via RegisterResponse.
-    heartbeat_interval_s: float = 2.0
-    heartbeat_timeout_s: float = 6.0
+    heartbeat_interval_s: float = 4.0
+    heartbeat_timeout_s: float = 10.0
     reaper_interval_s: float = 1.0
 
     # How long an unreachable worker stays in the registry before being dropped.
